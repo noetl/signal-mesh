@@ -1,7 +1,7 @@
 # A tiered A2A/ReAct agent mesh over the EHDB event log
 
 **Status:** design + POC · **merged to `main`** · nothing enabled, nothing deployed
-**POC:** `crates/ehdb-signal-mesh/` (`cargo run -p ehdb-signal-mesh --bin signal-mesh-demo`)
+**POC:** this repository (`cargo run --bin signal-mesh-demo`)
 
 📐 **Looking for the architecture overview?** This document is the
 implementation/proof spec — grounding, file:line evidence, and the POC. The
@@ -37,10 +37,10 @@ exist cannot be checked by its reader.
 | `loop.spec.mode` + `iterator` | `test_simple_loop.yaml:33-37` |
 | Child-playbook invocation | `noetl/ops` `automation/boot.yaml:15-16` (`kind: playbook`, `path: setup/bootstrap.yaml`) |
 | `playbook` is a registered tool kind | `noetl/tools` `src/registry.rs:406` |
-| SLM context event model — 7 payload kinds, `Unknown` fallback | **now on `main`**: `crates/ehdb-slm-context/src/event.rs:193-211` |
-| Pure fold `fold(events, up_to_seq, version)`, `canonical_bytes()`, `FoldError{UnsortedInput,ForeignExecution,Malformed}` | **now on `main`**: `crates/ehdb-slm-context/src/fold.rs` |
-| Multi-region primitives | **now on `main`** (v0.3.0): `crates/ehdb-core/src/plan.rs`, `crates/ehdb-l0/src/closed_timestamp.rs`, `membership.rs`, `placement.rs` |
-| D1 event log / D6 vector datasets | `crates/ehdb-l0/src/dataset.rs` (`DATASET_D1_EVENT_LOG`), `src/vector.rs` (`DATASET_D6_VECTOR`) |
+| SLM context event model — 7 payload kinds, `Unknown` fallback | **now on `main`**: `noetl/ehdb` `crates/ehdb-slm-context/src/event.rs:193-211` |
+| Pure fold `fold(events, up_to_seq, version)`, `canonical_bytes()`, `FoldError{UnsortedInput,ForeignExecution,Malformed}` | **now on `main`**: `noetl/ehdb` `crates/ehdb-slm-context/src/fold.rs` |
+| Multi-region primitives | **now on `main`** (v0.3.0): `noetl/ehdb` `crates/ehdb-core/src/plan.rs`, `crates/ehdb-l0/src/closed_timestamp.rs`, `membership.rs`, `placement.rs` |
+| D1 event log / D6 vector datasets | `noetl/ehdb` `crates/ehdb-l0/src/dataset.rs` (`DATASET_D1_EVENT_LOG`), `src/vector.rs` (`DATASET_D6_VECTOR`) |
 
 ### ⚠ Corrections — including three of my own
 

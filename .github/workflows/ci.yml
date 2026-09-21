@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      # Every declared build target must resolve to a git-TRACKED file.
+      #
+      # This runs BEFORE the full suite because it is the check that a
+      # developer's machine structurally cannot make: an ignored source is on
+      # disk locally, `git add` skips it silently, and `git status` never lists
+      # it. A clean checkout is the first place it can be seen -- which is here.
+      #
+      # `cargo test` below runs it too; this step exists so the failure is
+      # named and fast rather than buried in a full test run.
+      - name: Target hygiene (declared targets are git-tracked)
+        run: cargo test --test target_hygiene -- --nocapture
+      - run: cargo test
+      - run: cargo clippy --all-targets -- -D warnings
+      # The demo is the POC's only claim of behaviour; a compiling demo that
+      # panics is not evidence. Running it in CI keeps the README's stated
+      # verdict honest.
+      - run: cargo run --bin signal-mesh-demo

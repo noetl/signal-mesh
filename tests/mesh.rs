@@ -2,12 +2,12 @@
 //!
 //! Every one of these is deterministic: no clock, no network, no model.
 
-use ehdb_signal_mesh::a2a::{Task, TaskState};
-use ehdb_signal_mesh::event::*;
-use ehdb_signal_mesh::fold::*;
-use ehdb_signal_mesh::mesh::{Agent, Mesh};
-use ehdb_signal_mesh::mesh_armed;
-use ehdb_signal_mesh::react::DeterministicReasoner;
+use signal_mesh::a2a::{Task, TaskState};
+use signal_mesh::event::*;
+use signal_mesh::fold::*;
+use signal_mesh::mesh::{Agent, Mesh};
+use signal_mesh::mesh_armed;
+use signal_mesh::react::DeterministicReasoner;
 
 fn rec(seq: u64, stream: &str, payload: MeshEvent) -> Record {
     Record {

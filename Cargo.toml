@@ -1,14 +1,28 @@
 [package]
-name = "ehdb-signal-mesh"
+name = "signal-mesh"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/noetl/signal-mesh"
+description = "Tiered A2A/ReAct agent mesh over an event log: device signals reduced through hierarchical reasoning agents to one number and one boolean"
+readme = "README.md"
 publish = false
-description = "POC: tiered A2A/ReAct agent mesh over the EHDB event log (design/a2a-react-signal-mesh)"
 
 [dependencies]
-ehdb-core = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+# EHDB is consumed as a LIBRARY, pinned to a tag.
+#
+# ⚠ Pinned by `tag`, not `branch`. A branch dependency re-resolves on every
+# fresh `cargo build` with no lockfile, so two checkouts of the same commit can
+# compile against different ehdb source. The tag makes the dependency a fact
+# about this commit rather than about when it was built.
+#
+# The ehdb crates are not published to crates.io, so a git dependency is the
+# only option; `version` is therefore omitted deliberately.
+ehdb-core = { git = "https://github.com/noetl/ehdb", tag = "v0.3.0" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [[bin]]
 name = "signal-mesh-demo"

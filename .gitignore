@@ -1,0 +1,23 @@
+# Rust build output
+target/
+**/*.rs.bk
+*.pdb
+
+# Build results on 'Bin' directories (Visual Studio template convention)
+**/[Bb]in/*
+# ...but NOT Cargo's `src/bin/` convention.
+#
+# ⚠ This negation is load-bearing and is carried over from noetl/ehdb, where its
+# absence broke CI. The rule above matches `src/bin/*.rs`, so a bin target's
+# source is silently excluded: the crate builds locally because the file is on
+# disk, `git add` skips it without a word, and `git status` never shows it
+# because ignored files are not listed. A clean checkout is the first place it
+# can be seen. `tests/target_hygiene.rs` guards the same class.
+!**/src/[Bb]in/*
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/*
+!.vscode/settings.json

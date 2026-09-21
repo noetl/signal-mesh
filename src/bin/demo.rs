@@ -1,13 +1,13 @@
 //! Runnable demo: one signal cascading through three tiers, end to end.
 //!
-//!     cargo run -p ehdb-signal-mesh --bin signal-mesh-demo
+//!     cargo run --bin signal-mesh-demo
 //!
 //! Deterministic: same output every run, no clock, no network, no model.
 
-use ehdb_signal_mesh::event::MeshEvent;
-use ehdb_signal_mesh::fold::Reduction;
-use ehdb_signal_mesh::mesh::{Agent, Mesh};
-use ehdb_signal_mesh::react::DeterministicReasoner;
+use signal_mesh::event::MeshEvent;
+use signal_mesh::fold::Reduction;
+use signal_mesh::mesh::{Agent, Mesh};
+use signal_mesh::react::DeterministicReasoner;
 
 fn main() {
     // 6 devices -> 2 tier-0 agents (one per signal class) -> 1 tier-1
@@ -58,7 +58,7 @@ fn main() {
     }
     println!(
         "  well-known path: {}",
-        ehdb_signal_mesh::a2a::AGENT_CARD_WELL_KNOWN_PATH
+        signal_mesh::a2a::AGENT_CARD_WELL_KNOWN_PATH
     );
 
     println!("\n== Collector appends signals ==");
@@ -100,7 +100,7 @@ fn main() {
     println!("  total log records: {}", mesh.log.records.len());
 
     // Replay: fold the same prefix again and confirm the same verdict.
-    let replay = ehdb_signal_mesh::fold::fold(&mesh.log.records, &mesh.log.stream, watermark)
+    let replay = signal_mesh::fold::fold(&mesh.log.records, &mesh.log.stream, watermark)
         .expect("replay folds");
     println!("\n== Replay check ==");
     println!(

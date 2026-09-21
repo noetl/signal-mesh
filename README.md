@@ -1,17 +1,36 @@
-# ehdb-signal-mesh — POC
+# signal-mesh
 
-A tiered **A2A / ReAct** agent mesh over an EHDB-shaped event log. Design doc:
-[`docs/spec/a2a-react-signal-mesh.md`](../../docs/spec/a2a-react-signal-mesh.md).
+A tiered **A2A / ReAct** agent mesh over an [EHDB](https://github.com/noetl/ehdb)-shaped
+event log.
 
-⚠ **POC only.** Not wired into any production binary, not merged, flag-gated,
-and it executes no generated code. Read §11 of the design doc ("what the POC
-does NOT prove") before drawing conclusions from it — in particular there is no
-durability, no real A2A transport, and no scale evidence.
+Two documents live here, and they are not the same document:
+
+| | |
+| :-- | :-- |
+| [`docs/architecture/a2a-signal-mesh-blueprint.md`](docs/architecture/a2a-signal-mesh-blueprint.md) | **The team blueprint.** Diagram-forward. Start here. Source of truth — the copy on the wiki is downstream of this file. |
+| [`docs/spec/a2a-react-signal-mesh.md`](docs/spec/a2a-react-signal-mesh.md) | **The implementation/proof spec.** Grounding, `file:line` evidence, and what the POC does and does not prove (§11). |
+
+⚠ **POC only.** Not wired into any production binary, not deployed, nothing
+enabled. It executes no generated code. Read §11 of the spec — *"what the POC
+does NOT prove"* — before drawing conclusions from it: there is no durability,
+no real A2A transport, and no scale evidence.
+
+## Relationship to EHDB
+
+This crate depends on `ehdb-core` as a **library**, pinned by git tag:
+
+```toml
+ehdb-core = { git = "https://github.com/noetl/ehdb", tag = "v0.3.0" }
+```
+
+The NoETL crates are not published to crates.io, so a git dependency at a tag
+is the pin. It is a tag and not a branch on purpose — a branch dependency makes
+every build a different build.
 
 ## Run it
 
 ```bash
-cargo run -p ehdb-signal-mesh --bin signal-mesh-demo
+cargo run --bin signal-mesh-demo
 ```
 
 Deterministic: same output every run. No clock, no network, no model.
@@ -32,43 +51,16 @@ Expected verdict with the shipped fixture: `52.5000`, `true` (threshold `50.0`).
 ## Test it
 
 ```bash
-cargo test -p ehdb-signal-mesh
+cargo test
 ```
 
-9 tests, all deterministic.
+Deterministic, no network. Includes `tests/target_hygiene.rs`, which asserts
+every declared build target resolves to a **git-tracked** file — the guard for
+the failure class where a crate builds on the machine that wrote it and fails
+on every clean checkout. See the header comment in that file for the history.
 
-## Prove the tests actually catch things
+## History
 
-The suite is only worth the defects it fails on. Three defects on the core
-aggregation/fold logic, each caught by exactly one test:
-
-| Plant | Edit | Test that fails |
-| :-- | :-- | :-- |
-| D1 | `Reduction::WeightedMean` → plain mean of means | `weighted_mean_respects_population_not_child_count` |
-| D2 | `population()` → `ctx.inputs.len()` | `population_is_summed_not_counted` |
-| D3 | `if r.seq > up_to_seq` → `if false` | `the_bounded_read_excludes_everything_after_the_watermark` |
-
-⚠ **D1 is the interesting one.** A weighted mean that drops its weights is
-invisible whenever the weights are equal — which is exactly what a tidy fixture
-makes them. The test uses populations of 1 and 99 on purpose, and its second
-half asserts that an *equal*-weight fixture cannot tell the two implementations
-apart. A test for this defect written the natural way would pass against the bug.
-
-## Shape
-
-| File | What |
-| :-- | :-- |
-| `src/event.rs` | Six mesh event kinds; `Unknown` fallback for rolling upgrades |
-| `src/a2a.rs` | Agent Card + Task (all **8** `TaskState`s), canonical digest |
-| `src/fold.rs` | The pure bounded-read fold + the three reductions |
-| `src/react.rs` | The observe→reason→act loop; `Reasoner` trait |
-| `src/mesh.rs` | Log, agents, and the per-tier cascade |
-| `src/bin/demo.rs` | The runnable end-to-end story |
-
-## Flags
-
-Everything is off unless armed, and only the exact string `"true"` arms:
-
-- `NOETL_SIGNAL_MESH` — master arm
-- `NOETL_SIGNAL_MESH_REASONER` — opt into a model-backed reasoner (default:
-  deterministic; **no test asserts on the model path**)
+Split out of [`noetl/ehdb`](https://github.com/noetl/ehdb) on 2026-09-21 with
+`git filter-repo`; the six commits that built the crate and the two documents
+are preserved here with their original authorship and dates.
