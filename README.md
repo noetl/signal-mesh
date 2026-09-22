@@ -71,6 +71,33 @@ has written **nothing** to the substrate and a cold load fails outright. That is
 the unsealed-tail property, and `tests/m1_persistence.rs` asserts *both* halves:
 the cold load fails without a checkpoint and reproduces the verdict with one.
 
+## A2A transport (M2)
+
+Off by default. `off` means **no routes**, not a handler that declines:
+
+```bash
+NOETL_SIGNAL_MESH_A2A=serve \
+NOETL_SIGNAL_MESH_A2A_TOKEN=dev-token \
+cargo run --bin signal-mesh-serve
+
+curl -H 'Authorization: Bearer dev-token' \
+     localhost:8787/.well-known/agent-card.json
+```
+
+| route | |
+| :-- | :-- |
+| `GET /.well-known/agent-card.json` | the card, projected from a catalog entry (RFC 8615) |
+| `POST /a2a/tasks` | submit; negotiates on `Major.Minor` |
+| `POST /a2a/tasks/{id}/resume` | ⭐ resume an **interrupted** task |
+| `GET /metrics` | counters, every series pinned at 0 |
+
+⚠ `input-required` and `auth-required` are **interrupted, not terminal** — they
+resume. Treating them as failures is the most common way a dispatcher
+mis-implements A2A, and `tests/m2_transport.rs` fails if you do.
+
+⚠ A card declaring **no** security scheme is refused rather than served: "no
+scheme" means *not publishable outside the cluster*, not *open*.
+
 ## Test it
 
 ```bash

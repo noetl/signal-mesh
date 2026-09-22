@@ -255,6 +255,10 @@ exactly this reason.
 
 ### M2 — Real A2A transport
 
+> ✅ **LANDED.** `src/transport.rs`, `src/bin/serve.rs`, `tests/m2_transport.rs`.
+> All four ACs green plus the flag and the counter pins. 5/5 planted defects
+> caught — after the harness itself was fixed; see the note below.
+
 **Design**
 
 - Serve the Agent Card at **`/.well-known/agent-card.json`** (RFC 8615). New
@@ -284,6 +288,23 @@ exactly this reason.
    `2.0` peer refused.
 
 **Flag** `NOETL_SIGNAL_MESH_A2A` = off | `serve` | `serve+dispatch`.
+
+**⚠⚠ The harness lied before the guard did.** The first defect battery reported
+that *"interrupted states treated as terminal"* — the exact bug this milestone
+exists to prevent — **SURVIVED** all seven tests. It had not: `is_terminal` lives
+in `a2a.rs`, the plant edited `transport.rs`, and `str.replace` with an absent
+pattern is a silent no-op. Planted against the right file it is caught
+immediately. The battery now **asserts the plant changed the file** and carries
+a deliberate no-op as its own negative control. *A mutation that does not fail
+is a question about the test — unless it is a question about the mutation.*
+
+**⚠ What the MVP does not do here.** The card is proven to be a pure projection
+of a `CatalogEntry`, and `register_payload()` emits exactly the
+`{content, resource_type}` body `/api/catalog/register` takes — but nothing
+POSTs it. There is no noetl server in CI and the MVP may not touch prod. The
+projection property is tested; the round trip is not, and AC1's "third-party
+client" half is met by curl against `signal-mesh-serve`, not by a real A2A
+implementation.
 **Entry** M1 exited (a Task's answer is a log read; without M1 there is no log).
 **Exit** ACs 1–4 in kind, plus one third-party A2A client reading the card.
 **Blast radius** one new read-only route, off by default. No write path.
