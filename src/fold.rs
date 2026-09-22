@@ -61,6 +61,35 @@ pub struct TierContext {
     pub requested_up_to: u64,
 }
 
+impl TierContext {
+    /// A content digest of everything this context saw.
+    ///
+    /// ⭐ This is what makes "the answer survived the restart" a **checkable**
+    /// claim rather than an impression: re-fold after a cold load and compare
+    /// one string. Reuses the crate's existing `canonical_json` + `fnv1a_hex`
+    /// rather than adding a hash — a second digest is a second thing to keep
+    /// true.
+    ///
+    /// ⚠ `folded_through` is included and `requested_up_to` is not. The digest
+    /// answers *"is this the same context"*, and two folds of the same prefix
+    /// requested at different bounds ARE the same context. Including the
+    /// request would make the digest move for a reason the reader did not
+    /// change.
+    pub fn digest(&self) -> String {
+        let v = serde_json::json!({
+            "signals": self.signals.iter().map(|f| format!("{f:.12}")).collect::<Vec<_>>(),
+            "inputs": self.inputs.iter().map(|i| serde_json::json!({
+                "agent_id": i.agent_id,
+                "value": format!("{:.12}", i.value),
+                "input_count": i.input_count,
+                "up_to_seq": i.up_to_seq,
+            })).collect::<Vec<_>>(),
+            "folded_through": self.folded_through,
+        });
+        crate::a2a::fnv1a_hex(crate::a2a::canonical_json(&v).as_bytes())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TierInput {
     pub agent_id: String,

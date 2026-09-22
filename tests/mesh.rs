@@ -198,11 +198,11 @@ fn the_cascade_is_deterministic_and_replayable() {
     };
     let run = || {
         let mut m = Mesh::new("s", build(), 10.0);
-        m.observe_signal("d1", "temp", 12.0, 1);
-        m.observe_signal("d2", "temp", 18.0, 2);
+        let _ = m.observe_signal("d1", "temp", 12.0, 1);
+        let _ = m.observe_signal("d2", "temp", 18.0, 2);
         let head = m.log.head();
         let v = m.cascade(head, &DeterministicReasoner).expect("cascade");
-        (v, m.log.records.len())
+        (v, m.log.record_count().expect("count"))
     };
     let (a, na) = run();
     let (b, nb) = run();
@@ -223,17 +223,13 @@ fn every_decision_leaves_a_replayable_trace() {
         signal_class: Some("c".into()),
     }];
     let mut m = Mesh::new("s", agents, 1.0);
-    m.publish_cards();
-    m.observe_signal("d1", "c", 4.0, 1);
+    m.publish_cards().expect("cards");
+    let _ = m.observe_signal("d1", "c", 4.0, 1);
     let head = m.log.head();
     m.cascade(head, &DeterministicReasoner).expect("cascade");
 
-    let kinds: Vec<&str> = m
-        .log
-        .records
-        .iter()
-        .filter_map(|r| r.payload.kind())
-        .collect();
+    let all = m.log.records_up_to(u64::MAX).expect("read back");
+    let kinds: Vec<&str> = all.iter().filter_map(|r| r.payload.kind()).collect();
     for required in [
         "mesh.agent.card_published",
         "mesh.signal.observed",
@@ -248,9 +244,7 @@ fn every_decision_leaves_a_replayable_trace() {
         );
     }
     // Three ReAct phases per agent turn.
-    let phases: Vec<String> = m
-        .log
-        .records
+    let phases: Vec<String> = all
         .iter()
         .filter_map(|r| match &r.payload {
             MeshEvent::AgentReasoned(a) => Some(a.phase.clone()),

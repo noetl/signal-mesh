@@ -4,42 +4,7 @@ use crate::a2a::{AgentCard, Capabilities, Skill, Task, TaskState};
 use crate::event::*;
 use crate::fold::{fold, FoldError, Reduction};
 use crate::react::{run_cycle, Reasoner};
-
-/// An in-memory stand-in for EHDB's D1 event log.
-///
-/// ⚠ Append-only and sequence-assigning, which is the only part of D1 the mesh
-/// depends on. It is NOT a durability model — see the design doc.
-#[derive(Debug, Default)]
-pub struct EventLog {
-    pub stream: String,
-    pub records: Vec<Record>,
-    next_seq: u64,
-}
-
-impl EventLog {
-    pub fn new(stream: &str) -> Self {
-        Self {
-            stream: stream.to_string(),
-            records: Vec::new(),
-            next_seq: 1,
-        }
-    }
-
-    pub fn append(&mut self, payload: MeshEvent) -> u64 {
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        self.records.push(Record {
-            seq,
-            stream: self.stream.clone(),
-            payload,
-        });
-        seq
-    }
-
-    pub fn head(&self) -> u64 {
-        self.next_seq.saturating_sub(1)
-    }
-}
+use crate::store::{MemoryStore, MeshStore, StoreError};
 
 /// One agent in the mesh.
 pub struct Agent {
@@ -91,10 +56,44 @@ impl Agent {
 
 /// A tiered mesh.
 pub struct Mesh {
-    pub log: EventLog,
+    /// ⚠ A **seam**, not a field. `MemoryStore` is the default and stays
+    /// compiled and tested, because a rollback that is not exercised is a plan.
+    pub log: Box<dyn MeshStore>,
     pub agents: Vec<Agent>,
     pub threshold: f64,
 }
+
+/// Why a cascade did not produce a verdict.
+///
+/// ⚠ Two variants, not one flattened string. A fold refusal and a store refusal
+/// want different responses — one is a freshness/shape problem, the other is a
+/// durability problem — and a caller that cannot tell them apart will retry the
+/// wrong one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MeshError {
+    Fold(FoldError),
+    Store(StoreError),
+}
+
+impl From<FoldError> for MeshError {
+    fn from(e: FoldError) -> Self {
+        MeshError::Fold(e)
+    }
+}
+impl From<StoreError> for MeshError {
+    fn from(e: StoreError) -> Self {
+        MeshError::Store(e)
+    }
+}
+impl std::fmt::Display for MeshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MeshError::Fold(e) => write!(f, "fold refused: {e:?}"),
+            MeshError::Store(e) => write!(f, "{e}"),
+        }
+    }
+}
+impl std::error::Error for MeshError {}
 
 /// What one cascade produced.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,9 +106,15 @@ pub struct Verdict {
 }
 
 impl Mesh {
+    /// In-memory mesh — the default, and what every deterministic test uses.
     pub fn new(stream: &str, agents: Vec<Agent>, threshold: f64) -> Self {
+        Self::with_store(Box::new(MemoryStore::new(stream)), agents, threshold)
+    }
+
+    /// Mesh over any store. `EhdbStore` makes the answers durable (M1).
+    pub fn with_store(log: Box<dyn MeshStore>, agents: Vec<Agent>, threshold: f64) -> Self {
         Self {
-            log: EventLog::new(stream),
+            log,
             agents,
             threshold,
         }
@@ -119,7 +124,7 @@ impl Mesh {
     /// noetl catalog (`POST /api/catalog/register`, `server/src/main.rs:89`) —
     /// the same "catalog as carrier" pattern the SLM F2 decision used for
     /// generated steps. Here we record the digest so topology is replayable.
-    pub fn publish_cards(&mut self) {
+    pub fn publish_cards(&mut self) -> Result<(), StoreError> {
         let pubs: Vec<MeshEvent> = self
             .agents
             .iter()
@@ -132,8 +137,19 @@ impl Mesh {
             })
             .collect();
         for p in pubs {
-            self.log.append(p);
+            self.log.append(p)?;
         }
+        Ok(())
+    }
+
+    /// Push everything written so far past the durability barrier.
+    ///
+    /// ⚠ A no-op on the in-memory store, and a real seal + upload on the EHDB
+    /// one. Call it when an answer must survive losing the node, not merely the
+    /// process — the two are different failure modes and `store::EhdbStore`
+    /// spells out why.
+    pub fn checkpoint(&mut self) -> Result<(), StoreError> {
+        self.log.checkpoint()
     }
 
     /// Ingest one device reading (the collector's job).
@@ -143,13 +159,20 @@ impl Mesh {
         class: &str,
         value: f64,
         device_seq: u64,
-    ) -> u64 {
-        self.log.append(MeshEvent::SignalObserved(SignalObserved {
-            device_id: device_id.to_string(),
-            signal_class: class.to_string(),
-            value,
-            device_seq,
-        }))
+    ) -> Result<u64, StoreError> {
+        // The device's own sequence is the natural idempotency key: a redelivered
+        // reading is the SAME reading, and the engine acknowledges it at its
+        // existing position instead of inflating the denominator.
+        let event_id = format!("sig:{device_id}:{device_seq}");
+        self.log.append_with_id(
+            MeshEvent::SignalObserved(SignalObserved {
+                device_id: device_id.to_string(),
+                signal_class: class.to_string(),
+                value,
+                device_seq,
+            }),
+            Some(&event_id),
+        )
     }
 
     /// Run the cascade bottom-up at a named watermark.
@@ -174,8 +197,8 @@ impl Mesh {
         &mut self,
         up_to_seq: u64,
         reasoner: &dyn Reasoner,
-    ) -> Result<Verdict, FoldError> {
-        let before = self.log.records.len();
+    ) -> Result<Verdict, MeshError> {
+        let before = self.log.record_count()?;
         let mut tiers: Vec<u8> = self.agents.iter().map(|a| a.tier).collect();
         tiers.sort_unstable();
         tiers.dedup();
@@ -210,7 +233,7 @@ impl Mesh {
                         from_agent: "dispatcher".into(),
                         to_agent: id.clone(),
                         state: task.state.as_str().into(),
-                    }));
+                    }))?;
                 task.transition(TaskState::Working)
                     .expect("submitted->working");
                 self.log
@@ -219,12 +242,16 @@ impl Mesh {
                         from_agent: "dispatcher".into(),
                         to_agent: id.clone(),
                         state: task.state.as_str().into(),
-                    }));
+                    }))?;
 
                 // Bounded read of everything at or below the watermark, then
                 // narrow to this agent's children.
-                let stream = self.log.stream.clone();
-                let mut ctx = fold(&self.log.records, &stream, tier_watermark)?;
+                // ⭐ ONE bounded read per agent, and everything below derives
+                // from it. On `EhdbStore` this is `read_index_after` — the
+                // index-pruned prefix (fork F-1), not a scan.
+                let stream = self.log.stream().to_string();
+                let prefix = self.log.records_up_to(tier_watermark)?;
+                let mut ctx = fold(&prefix, &stream, tier_watermark)?;
                 if !children.is_empty() {
                     // An aggregator reduces its children only, never raw signals.
                     ctx.inputs.retain(|i| children.contains(&i.agent_id));
@@ -233,11 +260,8 @@ impl Mesh {
                     // A tier-0 agent reduces only its own signal class.
                     ctx.inputs.clear();
                     if let Some(class) = &signal_class {
-                        ctx.signals = self
-                            .log
-                            .records
+                        ctx.signals = prefix
                             .iter()
-                            .filter(|r| r.seq <= tier_watermark)
                             .filter_map(|r| match &r.payload {
                                 MeshEvent::SignalObserved(sg) if &sg.signal_class == class => {
                                     Some(sg.value)
@@ -248,13 +272,7 @@ impl Mesh {
                     }
                 }
 
-                let observed: Vec<u64> = self
-                    .log
-                    .records
-                    .iter()
-                    .filter(|r| r.seq <= tier_watermark)
-                    .map(|r| r.seq)
-                    .collect();
+                let observed: Vec<u64> = prefix.iter().map(|r| r.seq).collect();
 
                 let turns = run_cycle(&id, agent_tier, &ctx, how, reasoner);
                 let mut value = 0.0;
@@ -266,7 +284,7 @@ impl Mesh {
                         phase: t.phase.as_str().into(),
                         thought: t.thought.clone(),
                         observed_seqs: observed.clone(),
-                    }));
+                    }))?;
                     if let Some(v) = t.value {
                         value = v;
                     }
@@ -283,7 +301,7 @@ impl Mesh {
                         value,
                         input_count: pop,
                         up_to_seq: tier_watermark,
-                    }));
+                    }))?;
                 top_seq = emitted;
                 last_value = value;
 
@@ -295,7 +313,7 @@ impl Mesh {
                         from_agent: "dispatcher".into(),
                         to_agent: id.clone(),
                         state: task.state.as_str().into(),
-                    }));
+                    }))?;
             }
             // The tier finished; the next tier may see what it emitted.
             tier_watermark = self.log.head();
@@ -309,13 +327,13 @@ impl Mesh {
                 decision,
                 threshold: self.threshold,
                 up_to_seq: top_seq,
-            }));
+            }))?;
 
         Ok(Verdict {
             value: last_value,
             decision,
             up_to_seq: top_seq,
-            events_appended: self.log.records.len() - before,
+            events_appended: self.log.record_count()? - before,
         })
     }
 }

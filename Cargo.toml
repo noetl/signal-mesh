@@ -20,6 +20,7 @@ publish = false
 # The ehdb crates are not published to crates.io, so a git dependency is the
 # only option; `version` is therefore omitted deliberately.
 ehdb-core = { git = "https://github.com/noetl/ehdb", tag = "v0.3.0" }
+ehdb-l0 = { git = "https://github.com/noetl/ehdb", tag = "v0.3.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -49,6 +49,28 @@ You should see, in order:
 
 Expected verdict with the shipped fixture: `52.5000`, `true` (threshold `50.0`).
 
+## Durability (M1)
+
+By default the mesh keeps its log in memory, exactly as the POC did. Set the
+store selector to put it in a real EHDB `L0Engine`:
+
+```bash
+NOETL_SIGNAL_MESH_STORE=ehdb   # anything else, including unset, means memory
+```
+
+⚠ **Two different failure modes, and only one of them is free:**
+
+| failure | recovery | needs `checkpoint()`? |
+| :-- | :-- | :-- |
+| the **process** died, disk intact | re-open the same root | no |
+| the **node** died, disk gone | cold-load from the substrate | **yes** |
+
+The engine seals at 1024 records / 8 MiB by default, and one cascade over the
+shipped fixture appends 29 — so without an explicit `checkpoint()` a small mesh
+has written **nothing** to the substrate and a cold load fails outright. That is
+the unsealed-tail property, and `tests/m1_persistence.rs` asserts *both* halves:
+the cold load fails without a checkpoint and reproduces the verdict with one.
+
 ## Test it
 
 ```bash
