@@ -529,52 +529,43 @@ others to exist.
 ## 5. Dependency graph
 
 ```mermaid
-flowchart TB
-    subgraph EXT["Needs a PR outside this repo"]
-        E1["ehdb: wire NOETL_EHDB_READ_CONSISTENCY<br/>+ MAX_STALENESS_MS into AxisConfig"]
-        E2["server: serve the Agent Card route"]
-        E3["ehdb multi-region M5/M6:<br/>resolve_route beyond Owner"]
-    end
-    subgraph HAVE["Reused as-is"]
-        H1["L0Engine + D1 + read_index_after"]
-        H2["event_id dedupe at append"]
-        H3["ehdb-feed group commit"]
-        H4["ReadConsistency + resolve_visibility + admits"]
-        H5["ehdb-slm-context fold + Budget"]
-        H6["S3 gate, propose-only, python denied"]
-        H7["catalog register + pub DSL validator"]
-        H8["placement / membership / failure_domain"]
-    end
-    M1["M1 EHDB persistence"]
-    M2["M2 A2A transport"]
-    M3["M3 bounded staleness"]
-    M4["M4 real model"]
-    M5["M5 collectors + shards"]
-    M6["M6 concurrency + recovery"]
-    M7["M7 scale proof"]
-    M8["M8 playbook stepgen"]
-    M9["M9 operability"]
-    H1 --> M1
-    H2 --> M1
-    H5 --> M1
-    H3 --> M5
-    H4 --> M3
-    E1 --> M3
-    H7 --> M2
-    E2 --> M2
-    H6 --> M8
-    H8 --> M6
-    E3 -.blocks cross-region reads.-> M6
+flowchart LR
+    M1["M1 · EHDB persistence"]
+    M2["M2 · A2A transport"]
+    M3["M3 · bounded staleness"]
+    M4["M4 · real model"]
+    M5["M5 · collectors + shards"]
+    M6["M6 · concurrency + recovery"]
+    M7["M7 · scale proof"]
+    M8["M8 · playbook stepgen"]
+    M9["M9 · operability"]
+
     M1 --> M2
     M1 --> M3
     M1 --> M4
     M1 --> M5
+    M1 --> M9
     M3 --> M6
     M5 --> M6
     M6 --> M7
     M4 --> M8
-    M1 --> M9
+
+    E2(["needs a new route<br/>in noetl/server"]) -.-> M2
+    E1(["⚠ needs a NEW knob<br/>in noetl/ehdb"]) -.-> M3
+    E3(["⛔ ehdb multi-region M5/M6<br/>resolve_route is Owner-only"]) -.blocks cross-region reads.-> M6
 ```
+
+**What each milestone consumes from §2.1, reused as-is:**
+
+| Milestone | Reuses |
+| :-- | :-- |
+| **M1** | `L0Engine` + D1 (`engine.rs:313`), `event_id` dedupe at append (`engine.rs:728`), `read_index_after` (`engine.rs:1380`), `ehdb-slm-context`'s `FoldError` + `Budget` (`fold.rs:30,92`) |
+| **M2** | catalog register (`server/src/main.rs:89`) — **plus a new well-known route** |
+| **M3** | `ReadConsistency` (`plan.rs:178`), `resolve_visibility` (`plan.rs:377`), `admits` (`closed_timestamp.rs:159`) — ⚠ **plus a knob that does not exist yet** (§2.3) |
+| **M4** | `kind: mcp` (`tools/src/registry.rs:402`), the Gemma pin (`diagnose_execution.yaml:75,301`) |
+| **M5** | `ehdb-feed` group commit (`lib.rs:434`), `shard_for_execution` (`dataset.rs:269`), `placement::locality_from_env` (`placement.rs:52`) |
+| **M6** | `membership::view_for` (`membership.rs:249`), `failure_domain::survives_node_loss` (`failure_domain.rs:222`), `write_failover::activate` (`write_failover.rs:90`) |
+| **M8** | the S3 gate (`gate.rs`), the `pub` DSL validator (`server/src/playbook/parser.rs:15,164`) |
 
 **The critical path is M1 → M3 → M6 → M7.** M2 and M4 are parallelizable after
 M1. M3 is the one with an external dependency that is *not yet written*, so it
