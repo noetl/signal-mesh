@@ -35,6 +35,7 @@
 //! because "the engine allows it".
 
 use crate::event::{MeshEvent, Record};
+use crate::metrics::StoreCounters;
 use ehdb_l0::dataset::{shard_for_execution, Dataset};
 use ehdb_l0::engine::{L0Config, L0Engine};
 use ehdb_l0::substrate::{DurableSubstrate, LocalFsSubstrate};
@@ -44,6 +45,16 @@ use std::sync::Arc;
 
 /// `NOETL_SIGNAL_MESH_STORE` — `memory` (default) or `ehdb`.
 pub const STORE_ENV: &str = "NOETL_SIGNAL_MESH_STORE";
+
+/// `NOETL_SIGNAL_MESH_STORE_ROOT` — where [`EhdbStore`] keeps its substrate and
+/// local parts. Required when the store is `ehdb`; there is deliberately **no
+/// default path**.
+///
+/// ⚠⚠ A default would be the `/data` trap the fleet already paid for:
+/// `LocalFsSubstrate::new` calls `create_dir_all`, so an unmounted path
+/// silently becomes the container's ephemeral layer and the engine looks
+/// healthy right up to the eviction. Refusing to start is the honest behaviour.
+pub const STORE_ROOT_ENV: &str = "NOETL_SIGNAL_MESH_STORE_ROOT";
 
 /// ⚠⚠ **The smaller of the two ceilings, on purpose.**
 ///
@@ -201,6 +212,14 @@ pub trait MeshStore {
         self.append_with_id(payload, None)
     }
 
+    /// This store's counters. ⚠ On the trait rather than the concrete types so
+    /// a renderer does not have to know which backend is configured — which is
+    /// the same reason `store` is a metric label and not a metric name.
+    fn counters(&self) -> &StoreCounters;
+
+    /// The value of the `store` label for this implementation.
+    fn label(&self) -> &'static str;
+
     /// Push everything written so far past the durability barrier.
     ///
     /// ⚠ The default is a **no-op, and honestly so**: `MemoryStore` has no
@@ -214,9 +233,15 @@ pub trait MeshStore {
 
 /// Serialized size gate, shared by both stores so the ceiling cannot differ
 /// between the default path and the one under test.
-fn encode(payload: &MeshEvent) -> Result<String, StoreError> {
-    let s = serde_json::to_string(payload).map_err(|e| StoreError::Codec(e.to_string()))?;
+fn encode(payload: &MeshEvent, c: &StoreCounters) -> Result<String, StoreError> {
+    let s = serde_json::to_string(payload).map_err(|e| {
+        StoreCounters::incr(&c.refused_codec);
+        StoreError::Codec(e.to_string())
+    })?;
     if s.len() > MAX_PAYLOAD_BYTES {
+        // ⚠ Counted at the refusal, not at the call site. A caller that forgets
+        // to count is a caller whose refusals are invisible.
+        StoreCounters::incr(&c.refused_too_large);
         return Err(StoreError::PayloadTooLarge {
             bytes: s.len(),
             cap: MAX_PAYLOAD_BYTES,
@@ -232,15 +257,23 @@ pub struct MemoryStore {
     pub records: Vec<Record>,
     seen: Vec<String>,
     next_seq: u64,
+    counters: Arc<StoreCounters>,
 }
 
 impl MemoryStore {
+    /// Share this store's counters with a metrics listener.
+    pub fn with_counters(mut self, c: Arc<StoreCounters>) -> Self {
+        self.counters = c;
+        self
+    }
+
     pub fn new(stream: &str) -> Self {
         Self {
             stream: stream.to_string(),
             records: Vec::new(),
             seen: Vec::new(),
             next_seq: 1,
+            counters: Arc::new(StoreCounters::new()),
         }
     }
 }
@@ -257,11 +290,12 @@ impl MeshStore for MemoryStore {
     ) -> Result<u64, StoreError> {
         // The size gate runs on BOTH paths. A ceiling enforced only by the
         // engine would not exist in the default configuration.
-        let _ = encode(&payload)?;
+        let _ = encode(&payload, &self.counters)?;
         if let Some(id) = event_id {
             if let Some(pos) = self.seen.iter().position(|s| s == id) {
                 // Acknowledge at the existing position — the same contract as
                 // `L0Engine::append_record_reporting` returning `appended=false`.
+                StoreCounters::incr(&self.counters.deduped);
                 return Ok(self.records[pos].seq);
             }
             self.seen.push(id.to_string());
@@ -275,16 +309,20 @@ impl MeshStore for MemoryStore {
             stream: self.stream.clone(),
             payload,
         });
+        StoreCounters::incr(&self.counters.appended);
         Ok(seq)
     }
 
     fn records_up_to(&self, up_to_seq: u64) -> Result<Vec<Record>, StoreError> {
-        Ok(self
+        let out: Vec<Record> = self
             .records
             .iter()
             .filter(|r| r.seq <= up_to_seq)
             .cloned()
-            .collect())
+            .collect();
+        StoreCounters::incr(&self.counters.reads);
+        StoreCounters::add(&self.counters.records_read, out.len() as u64);
+        Ok(out)
     }
 
     fn head(&self) -> u64 {
@@ -294,6 +332,22 @@ impl MeshStore for MemoryStore {
     fn record_count(&self) -> Result<usize, StoreError> {
         Ok(self.records.len())
     }
+
+    fn counters(&self) -> &StoreCounters {
+        &self.counters
+    }
+
+    fn label(&self) -> &'static str {
+        "memory"
+    }
+
+    fn checkpoint(&mut self) -> Result<(), StoreError> {
+        // ⚠ Counted even though it does nothing. An operator comparing the two
+        // stores needs to see that the barrier was REACHED and was a no-op,
+        // which is different from never having been called.
+        StoreCounters::incr(&self.counters.checkpoints);
+        Ok(())
+    }
 }
 
 /// A real `L0Engine` over a durable substrate.
@@ -301,6 +355,7 @@ pub struct EhdbStore {
     stream: String,
     engine: L0Engine<MeshDataset>,
     head: u64,
+    counters: Arc<StoreCounters>,
 }
 
 impl EhdbStore {
@@ -322,6 +377,7 @@ impl EhdbStore {
             stream: stream.to_string(),
             engine,
             head: 0,
+            counters: Arc::new(StoreCounters::new()),
         };
         s.head = s.recover_head()?;
         Ok(s)
@@ -346,6 +402,7 @@ impl EhdbStore {
             stream: stream.to_string(),
             engine,
             head: 0,
+            counters: Arc::new(StoreCounters::new()),
         };
         s.head = s.recover_head()?;
         Ok(s)
@@ -363,6 +420,12 @@ impl EhdbStore {
         self.engine
             .read_index_after(&self.stream, after_seq)
             .map_err(|e| StoreError::Engine(e.to_string()))
+    }
+
+    /// Share this store's counters with a metrics listener.
+    pub fn with_counters(mut self, c: Arc<StoreCounters>) -> Self {
+        self.counters = c;
+        self
     }
 
     /// ⭐⭐ **The durability barrier.** Seal every pending part and block until
@@ -388,9 +451,14 @@ impl EhdbStore {
     /// before a cold-load equality check"* (`engine.rs:1008`), which is exactly
     /// this call site.
     pub fn checkpoint_impl(&mut self) -> Result<(), StoreError> {
-        self.engine
+        let r = self
+            .engine
             .flush_and_wait_uploads()
-            .map_err(|e| StoreError::Engine(e.to_string()))
+            .map_err(|e| StoreError::Engine(e.to_string()));
+        if r.is_ok() {
+            StoreCounters::incr(&self.counters.checkpoints);
+        }
+        r
     }
 
     /// Which partition this stream reads from — exposed so a test can assert
@@ -410,7 +478,7 @@ impl MeshStore for EhdbStore {
         payload: MeshEvent,
         event_id: Option<&str>,
     ) -> Result<u64, StoreError> {
-        let encoded = encode(&payload)?;
+        let encoded = encode(&payload, &self.counters)?;
         let record = MeshRecord {
             // Overwritten by `assign_sort_key`; the writer owns the order.
             seq: 0,
@@ -426,9 +494,16 @@ impl MeshStore for EhdbStore {
         let (seq, appended) = self
             .engine
             .append_writer_assigned_reporting(record)
-            .map_err(|e| StoreError::Engine(e.to_string()))?;
+            .map_err(|e| {
+                StoreCounters::incr(&self.counters.refused_engine);
+                StoreError::Engine(e.to_string())
+            })?;
         if appended {
             self.head = self.head.max(seq);
+            StoreCounters::incr(&self.counters.appended);
+        } else {
+            // ⭐ The series that separates a working dedupe from a broken writer.
+            StoreCounters::incr(&self.counters.deduped);
         }
         Ok(seq)
     }
@@ -439,8 +514,10 @@ impl MeshStore for EhdbStore {
             if r.seq > up_to_seq {
                 continue;
             }
-            let payload: MeshEvent =
-                serde_json::from_str(&r.payload).map_err(|e| StoreError::Codec(e.to_string()))?;
+            let payload: MeshEvent = serde_json::from_str(&r.payload).map_err(|e| {
+                StoreCounters::incr(&self.counters.refused_codec);
+                StoreError::Codec(e.to_string())
+            })?;
             out.push(Record {
                 seq: r.seq,
                 stream: r.stream,
@@ -448,6 +525,8 @@ impl MeshStore for EhdbStore {
             });
         }
         out.sort_by_key(|r| r.seq);
+        StoreCounters::incr(&self.counters.reads);
+        StoreCounters::add(&self.counters.records_read, out.len() as u64);
         Ok(out)
     }
 
@@ -457,6 +536,14 @@ impl MeshStore for EhdbStore {
 
     fn record_count(&self) -> Result<usize, StoreError> {
         Ok(self.raw(0)?.len())
+    }
+
+    fn counters(&self) -> &StoreCounters {
+        &self.counters
+    }
+
+    fn label(&self) -> &'static str {
+        "ehdb"
     }
 
     fn checkpoint(&mut self) -> Result<(), StoreError> {
