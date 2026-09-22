@@ -9,6 +9,7 @@ Two documents live here, and they are not the same document:
 | :-- | :-- |
 | [`docs/architecture/a2a-signal-mesh-blueprint.md`](docs/architecture/a2a-signal-mesh-blueprint.md) | **The team blueprint.** Diagram-forward. Start here. Source of truth — the copy on the wiki is downstream of this file. |
 | [`docs/spec/a2a-react-signal-mesh.md`](docs/spec/a2a-react-signal-mesh.md) | **The implementation/proof spec.** Grounding, `file:line` evidence, and what the POC does and does not prove (§11). |
+| [`docs/production-implementation-plan.md`](docs/production-implementation-plan.md) | **The production scope.** How the POC becomes deployable: M1–M9, each flag-gated and default-off, with a dependency graph, a flag matrix, and an MVP cut. Plan only — nothing built. |
 
 ⚠ **POC only.** Not wired into any production binary, not deployed, nothing
 enabled. It executes no generated code. Read §11 of the spec — *"what the POC
