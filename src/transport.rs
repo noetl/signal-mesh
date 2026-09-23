@@ -221,17 +221,32 @@ pub struct A2aState {
     pub entry: CatalogEntry,
     /// Bearer token a caller must present when the card declares a scheme.
     pub token: Option<String>,
-    pub counters: Counters,
+    /// ⚠⚠ **Shared, not owned.** A process can expose two `/metrics` surfaces —
+    /// the A2A router's and the standalone listener's — and if each holds its
+    /// own `Counters` they disagree: one reports the card served, the other
+    /// reports zero. That is the "metric on the wrong registry is invisible"
+    /// failure, and the first M9 build had it.
+    pub counters: Arc<Counters>,
     tasks: Mutex<BTreeMap<String, Task>>,
 }
 
 impl A2aState {
     pub fn new(mode: A2aMode, entry: CatalogEntry, token: Option<String>) -> Self {
+        Self::with_counters(mode, entry, token, Arc::new(Counters::new()))
+    }
+
+    /// Share the counters with another exposition surface.
+    pub fn with_counters(
+        mode: A2aMode,
+        entry: CatalogEntry,
+        token: Option<String>,
+        counters: Arc<Counters>,
+    ) -> Self {
         Self {
             mode,
             entry,
             token,
-            counters: Counters::new(),
+            counters,
             tasks: Mutex::new(BTreeMap::new()),
         }
     }

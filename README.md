@@ -98,6 +98,26 @@ mis-implements A2A, and `tests/m2_transport.rs` fails if you do.
 ⚠ A card declaring **no** security scheme is refused rather than served: "no
 scheme" means *not publishable outside the cluster*, not *open*.
 
+## Operability (M9)
+
+```bash
+NOETL_SIGNAL_MESH_METRICS_ADDR=127.0.0.1:9797   # unset = no listener at all
+```
+
+⭐ Independent of `_A2A` on purpose: before M9 the only `/metrics` rode the A2A
+router, so a deployment could not be observed without also exposing its agent
+surface.
+
+Every series is pinned at 0 **for both stores**, including the one that is not
+configured — absent reads exactly like zero. `signal_mesh_build_info` is always
+1, so *"does this pod predate that metric?"* is answerable from the scrape
+rather than from an image tag.
+
+📄 **[`docs/deployment-specification.md`](docs/deployment-specification.md)** —
+the runtime contract: every env var with the *why*, ports, sizing, probes,
+durability, rollback. ⚠ A test fails the build if a declared variable is
+undocumented there, or documented and read nowhere.
+
 ## Test it
 
 ```bash

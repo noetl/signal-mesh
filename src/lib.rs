@@ -10,6 +10,7 @@ pub mod a2a;
 pub mod event;
 pub mod fold;
 pub mod mesh;
+pub mod metrics;
 pub mod react;
 pub mod store;
 pub mod transport;

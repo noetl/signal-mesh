@@ -550,6 +550,11 @@ entries are removed by prefix.
 
 ### M9 — Operability
 
+> ✅ **LANDED.** `src/metrics.rs`, `docs/deployment-specification.md`,
+> `tests/m9_operability.rs`. 6/6 planted defects caught — plus **three real
+> defects the end-to-end run found that the unit tests had not**, each now
+> guarded. See below.
+
 Not optional, and not last because it matters least — last because it needs the
 others to exist.
 
@@ -564,6 +569,26 @@ others to exist.
 - A deployment-spec page per deployable binary, with the full env-var catalogue
   and **the why** for each — the fleet's existing rule, and the reason this plan
   can cite `gate.rs` flags by name at all.
+
+**⚠⚠ What M9 found, in order.**
+
+1. **Three of six declared flags had no reader** — including the master arm
+   `NOETL_SIGNAL_MESH`. `mesh_armed` and `store_kind` existed, were pure, and
+   were tested; nothing ever passed them the process environment. The guard now
+   fails the build on a declared-and-unread variable. *A declared flag with no
+   reader is not a flag.*
+2. **The metrics body was rendered once at startup.** Every probe got 200, every
+   series was present and correctly pinned at 0 — and no counter could ever
+   move. A frozen endpoint is indistinguishable from an idle system.
+3. **The two `/metrics` surfaces disagreed.** `A2aState` held its own
+   `Counters` while the standalone listener held a different `Arc`, so one
+   reported a card served and the other reported zero. Both returned 200;
+   whichever an operator scraped decided what they believed.
+
+None of the three was visible to a unit test that passed. All three came from
+**running the binary and reading the output**, which is the same lesson the
+mermaid diagrams taught one milestone earlier: rendering is not the same as
+compiling, and a green suite is not a running system.
 
 ---
 
