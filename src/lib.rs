@@ -12,6 +12,7 @@ pub mod fold;
 pub mod mesh;
 pub mod react;
 pub mod store;
+pub mod transport;
 
 /// Master flag. Everything in the mesh stays off unless this is exactly
 /// `"true"` — the house convention (`seal_max_age`, fencing, the repair sweep
