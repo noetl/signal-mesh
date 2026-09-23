@@ -190,6 +190,10 @@ POC's own `mesh_armed`).
 
 ### M1 — Real EHDB persistence
 
+> ✅ **LANDED.** `src/store.rs`, `tests/m1_persistence.rs`. All five ACs green,
+> plus the payload-ceiling boundary and the flag. 4/4 planted defects caught.
+> ⚠ AC2 split in two once it was built: see the note below.
+
 **Replaces** `src/mesh.rs`'s `EventLog` with D1 through `L0Engine`.
 
 **Design**
@@ -224,6 +228,22 @@ POC's own `mesh_armed`).
 5. Unknown event kinds still fold and still advance the watermark.
 
 **Flag** `NOETL_SIGNAL_MESH_STORE` = `memory` (default) | `ehdb`.
+
+**⚠ What building it changed.** AC2 said *"process restart → re-fold →
+identical digest"*. That conflated two failure modes, and the first run of the
+test said so: `cold_load` failed with *"no durable manifest for dataset
+mesh_event_log"*, because the engine seals at 1024 records / 8 MiB and a
+cascade appends 29. A **process** restart (same disk) needs nothing; a **node**
+loss needs an explicit `checkpoint()` past the durability barrier
+(`flush_and_wait_uploads`, `engine.rs:1008`). Both are now tested, and the
+node-loss test asserts the *negative* half too — without a checkpoint the cold
+load must fail — so a future no-op `checkpoint()` cannot pass silently.
+
+**⚠ And a second near-miss, in my own test.** The first version compared
+digests over the prefix at the watermark: 6 records out of 35. It passed while
+saying nothing about the 29 cascade events, including the verdict. Both restart
+tests now assert the **full** record count and find the `VerdictSynthesised`
+record by value. *A digest over a prefix is evidence about the prefix.*
 **Entry** §2.4's shared-engine assumption resolved.
 **Exit** all five ACs green in kind, twice, from a clean substrate.
 **Blast radius** a new D1 **dataset instance or key space**, never the

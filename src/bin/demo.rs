@@ -44,7 +44,7 @@ fn main() {
     ];
     let mut mesh = Mesh::new("exec-demo-1", agents, 50.0);
 
-    mesh.publish_cards();
+    mesh.publish_cards().expect("cards published");
     println!("== Agent Cards published (A2A discovery) ==");
     for a in &mesh.agents {
         let c = a.card();
@@ -73,7 +73,9 @@ fn main() {
     .iter()
     .enumerate()
     {
-        let seq = mesh.observe_signal(dev, class, *val, i as u64 + 1);
+        let seq = mesh
+            .observe_signal(dev, class, *val, i as u64 + 1)
+            .expect("collector appends");
         println!("  seq {seq:>3}  {dev} {class}={val}");
     }
 
@@ -84,7 +86,8 @@ fn main() {
         .expect("cascade folds");
 
     println!("\n== Reasoning trace (ReAct turns, replayable) ==");
-    for r in mesh.log.records.iter().filter(|r| r.seq > watermark) {
+    let all = mesh.log.records_up_to(u64::MAX).expect("read back");
+    for r in all.iter().filter(|r| r.seq > watermark) {
         if let MeshEvent::AgentReasoned(a) = &r.payload {
             println!("  seq {:>3} [{}] {}", r.seq, a.phase, a.thought);
         }
@@ -97,11 +100,11 @@ fn main() {
         v.decision, mesh.threshold
     );
     println!("  events appended by the cascade: {}", v.events_appended);
-    println!("  total log records: {}", mesh.log.records.len());
+    println!("  total log records: {}", all.len());
 
     // Replay: fold the same prefix again and confirm the same verdict.
-    let replay = signal_mesh::fold::fold(&mesh.log.records, &mesh.log.stream, watermark)
-        .expect("replay folds");
+    let stream = mesh.log.stream().to_string();
+    let replay = signal_mesh::fold::fold(&all, &stream, watermark).expect("replay folds");
     println!("\n== Replay check ==");
     println!(
         "  re-folded {} signal(s) through seq {} (staleness {})",
