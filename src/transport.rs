@@ -32,6 +32,8 @@
 //! identical on a scrape, and a pin inside a config branch is not a pin.
 
 use crate::a2a::{canonical_json, fnv1a_hex, AgentCard, Task, TaskState};
+use crate::mesh::{Mesh, Verdict};
+use crate::react::DeterministicReasoner;
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, Request, StatusCode};
@@ -49,6 +51,47 @@ pub const A2A_ENV: &str = "NOETL_SIGNAL_MESH_A2A";
 /// The protocol version this build speaks. Negotiation is on `Major.Minor`;
 /// the patch is excluded by the spec.
 pub const PROTOCOL_VERSION: &str = "1.0";
+
+/// `NOETL_SIGNAL_MESH_A2A_TOKEN_FILE` — path to a file holding the bearer
+/// token, mounted from a Kubernetes Secret.
+///
+/// ⚠⚠ **This is the only acceptable way to supply the token in a deployment.**
+/// `execution-model.md` forbids a business-logic credential in a pod env var,
+/// and a bearer is one. An env var is visible in `kubectl describe pod`, in the
+/// Deployment spec, and to anything that can read the pod's environ; a file
+/// mounted from a Secret is none of those. The env form is kept ONLY for local
+/// development and is refused when the file form is configured, so a deployment
+/// cannot silently fall back to the weaker one.
+pub const A2A_TOKEN_FILE_ENV: &str = "NOETL_SIGNAL_MESH_A2A_TOKEN_FILE";
+
+/// Resolve the bearer token, preferring the mounted file.
+///
+/// Returns `Err` with a reason rather than `None`, because "no token" and
+/// "token file unreadable" want different operator responses and collapsing
+/// them is how a misconfigured mount reads as an unconfigured one.
+pub fn resolve_token(file_path: Option<&str>, env_value: Option<&str>) -> Result<String, String> {
+    match file_path.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            // ⚠ A configured file wins outright. If BOTH are set the env one is
+            // ignored, not merged — a deployment that accidentally carries the
+            // env form must not be able to override the Secret.
+            let raw = std::fs::read_to_string(p)
+                .map_err(|e| format!("cannot read {A2A_TOKEN_FILE_ENV}={p}: {e}"))?;
+            let t = raw.trim().to_string();
+            if t.is_empty() {
+                return Err(format!("{A2A_TOKEN_FILE_ENV}={p} is empty"));
+            }
+            Ok(t)
+        }
+        None => match env_value.map(str::trim).filter(|v| !v.is_empty()) {
+            Some(v) => Ok(v.to_string()),
+            None => Err(format!(
+                "no bearer token: set {A2A_TOKEN_FILE_ENV} (deployments) or \
+                 NOETL_SIGNAL_MESH_A2A_TOKEN (local development only)"
+            )),
+        },
+    }
+}
 
 /// What the transport is allowed to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -228,6 +271,15 @@ pub struct A2aState {
     /// failure, and the first M9 build had it.
     pub counters: Arc<Counters>,
     tasks: Mutex<BTreeMap<String, Task>>,
+    /// ⭐ The M1↔M2 join. Without it the service opens a durable store, drives
+    /// checkpoints against it, and **never writes a byte** — M1 and M2 both
+    /// real and never connected. A durable store nothing reaches is not
+    /// durability, it is an empty volume with a timer.
+    ///
+    /// `Mutex<Option<..>>` rather than a bare store: the mesh is optional
+    /// (`memory` deployments and unit tests do not need one) and the store is
+    /// `Send` but not `Sync`.
+    pub mesh: Mutex<Option<Mesh>>,
 }
 
 impl A2aState {
@@ -248,7 +300,14 @@ impl A2aState {
             token,
             counters,
             tasks: Mutex::new(BTreeMap::new()),
+            mesh: Mutex::new(None),
         }
+    }
+
+    /// Attach the cascade, so the served agent can actually produce answers.
+    pub fn with_mesh(self, mesh: Mesh) -> Self {
+        *self.mesh.lock().expect("mesh") = Some(mesh);
+        self
     }
 
     /// Does the served card require authentication?
@@ -292,6 +351,15 @@ pub struct SubmitTask {
     /// the two resumable states, exercised over the wire.
     #[serde(default)]
     pub needs: Option<String>,
+}
+
+/// Body for `POST /mesh/signals` — one device reading.
+#[derive(Debug, Deserialize)]
+pub struct ObserveSignal {
+    pub device_id: String,
+    pub signal_class: String,
+    pub value: f64,
+    pub device_seq: u64,
 }
 
 /// Body for `POST /a2a/tasks/{id}/resume`.
@@ -425,6 +493,117 @@ async fn resume_task(
     Json(task.clone()).into_response()
 }
 
+/// Ingest one signal. ⚠ This is the ONLY write path into the store.
+async fn observe(
+    State(s): State<Arc<A2aState>>,
+    headers: HeaderMap,
+    Json(b): Json<ObserveSignal>,
+) -> Response {
+    if !authorized(&s, &headers) {
+        Counters::incr(&s.counters.card_refused_unauthenticated);
+        return refuse(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "bearer required",
+        );
+    }
+    let mut g = s.mesh.lock().expect("mesh");
+    let Some(m) = g.as_mut() else {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no-mesh",
+            "no cascade attached",
+        );
+    };
+    match m.observe_signal(&b.device_id, &b.signal_class, b.value, b.device_seq) {
+        Ok(seq) => Json(serde_json::json!({ "seq": seq, "head": m.log.head() })).into_response(),
+        Err(e) => refuse(StatusCode::BAD_REQUEST, "append-failed", e.to_string()),
+    }
+}
+
+/// Run the cascade at the current head and persist every event it produces.
+async fn cascade(State(s): State<Arc<A2aState>>, headers: HeaderMap) -> Response {
+    if !authorized(&s, &headers) {
+        Counters::incr(&s.counters.card_refused_unauthenticated);
+        return refuse(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "bearer required",
+        );
+    }
+    let mut g = s.mesh.lock().expect("mesh");
+    let Some(m) = g.as_mut() else {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no-mesh",
+            "no cascade attached",
+        );
+    };
+    let head = m.log.head();
+    match m.cascade(head, &DeterministicReasoner) {
+        Ok(v) => Json(verdict_json(&v, head)).into_response(),
+        Err(e) => refuse(StatusCode::CONFLICT, "cascade-refused", e.to_string()),
+    }
+}
+
+/// Re-fold the persisted log and report what it holds. ⭐ This is the
+/// restart-survival probe: it reads ONLY from the store.
+async fn replay(State(s): State<Arc<A2aState>>, headers: HeaderMap) -> Response {
+    if !authorized(&s, &headers) {
+        Counters::incr(&s.counters.card_refused_unauthenticated);
+        return refuse(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "bearer required",
+        );
+    }
+    let mut g = s.mesh.lock().expect("mesh");
+    let Some(m) = g.as_mut() else {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no-mesh",
+            "no cascade attached",
+        );
+    };
+    let head = m.log.head();
+    let records = match m.log.records_up_to(head) {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "read-failed",
+                e.to_string(),
+            )
+        }
+    };
+    let stream = m.log.stream().to_string();
+    let ctx = match crate::fold::fold(&records, &stream, head) {
+        Ok(c) => c,
+        Err(e) => return refuse(StatusCode::CONFLICT, "fold-refused", format!("{e:?}")),
+    };
+    let verdict = records.iter().rev().find_map(|r| match &r.payload {
+        crate::event::MeshEvent::VerdictSynthesised(v) => Some(v.value),
+        _ => None,
+    });
+    Json(serde_json::json!({
+        "records": records.len(),
+        "head": head,
+        "digest": ctx.digest(),
+        "folded_through": ctx.folded_through,
+        "staleness": ctx.staleness(),
+        "verdict": verdict,
+    }))
+    .into_response()
+}
+
+fn verdict_json(v: &Verdict, at: u64) -> serde_json::Value {
+    serde_json::json!({
+        "value": v.value, "decision": v.decision,
+        "up_to_seq": v.up_to_seq, "events_appended": v.events_appended,
+        "cascaded_at_head": at,
+    })
+}
+
 async fn metrics(State(s): State<Arc<A2aState>>) -> Response {
     (
         StatusCode::OK,
@@ -445,6 +624,9 @@ pub fn router(state: Arc<A2aState>) -> Router {
         .route("/a2a/tasks", post(submit_task))
         .route("/a2a/tasks/{id}", get(get_task))
         .route("/a2a/tasks/{id}/resume", post(resume_task))
+        .route("/mesh/signals", post(observe))
+        .route("/mesh/cascade", post(cascade))
+        .route("/mesh/replay", get(replay))
         .route("/metrics", get(metrics))
         .with_state(state)
 }

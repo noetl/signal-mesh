@@ -56,6 +56,25 @@ pub const STORE_ENV: &str = "NOETL_SIGNAL_MESH_STORE";
 /// healthy right up to the eviction. Refusing to start is the honest behaviour.
 pub const STORE_ROOT_ENV: &str = "NOETL_SIGNAL_MESH_STORE_ROOT";
 
+/// `NOETL_SIGNAL_MESH_CHECKPOINT_SECS` — how often to cross the durability
+/// barrier. **Required when the store is `ehdb`; there is no default.**
+///
+/// ⚠⚠ **Why a TIMER and not a lower `seal_max_records`.** Both bound the
+/// unsealed tail, but in different units, and only one matches the risk.
+///
+/// `seal_max_records` bounds it in **appends**: the part seals once N records
+/// land. The dangerous case is precisely when appends *stop* — a half-full part
+/// then sits on one local disk indefinitely, and the quieter the mesh the worse
+/// the exposure. `ehdb-l0` already demonstrates the trap: `seal_max_age` exists
+/// but `seal_aged_parts` is only consulted on append, so the age trigger is
+/// inert on exactly the shard it was added for unless something drives it.
+///
+/// A timer bounds it in **seconds**, which is the unit "how much can node loss
+/// cost me" is actually measured in, and it is independent of traffic. So the
+/// mesh drives `checkpoint()` on an interval and states the window plainly:
+/// lose the node, lose at most this many seconds of appends.
+pub const CHECKPOINT_SECS_ENV: &str = "NOETL_SIGNAL_MESH_CHECKPOINT_SECS";
+
 /// ⚠⚠ **The smaller of the two ceilings, on purpose.**
 ///
 /// `ehdb-l0` accepts a 64 MiB frame (`frame.rs:25` `MAX_FRAME_BODY_BYTES`). The
@@ -181,7 +200,11 @@ impl Dataset for MeshDataset {
 /// Kept this narrow on purpose: every method here is one the cascade already
 /// called on the POC's `Vec`, so swapping the implementation cannot quietly
 /// change what the cascade does.
-pub trait MeshStore {
+/// ⚠ `Send` is required so the checkpoint driver can own a store on its own
+/// thread. It is deliberately NOT `Sync`: nothing shares a store across threads,
+/// and requiring `Sync` would push every implementation toward interior
+/// mutability it does not need.
+pub trait MeshStore: Send {
     fn stream(&self) -> &str;
 
     /// Append one event. `event_id` is the idempotency key; `None` opts that

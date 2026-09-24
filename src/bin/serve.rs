@@ -19,18 +19,61 @@
 //! that is not a platform credential.
 
 use signal_mesh::a2a::{AgentCard, Capabilities, Skill};
+use signal_mesh::fold::Reduction;
+use signal_mesh::mesh::{Agent, Mesh};
 use signal_mesh::metrics::{render_all, StoreCounters, METRICS_ADDR_ENV};
 use signal_mesh::store::{
-    store_kind, EhdbStore, MemoryStore, MeshStore, StoreKind, STORE_ROOT_ENV,
+    store_kind, EhdbStore, MemoryStore, MeshStore, StoreKind, CHECKPOINT_SECS_ENV, STORE_ROOT_ENV,
 };
 use signal_mesh::transport::{
-    a2a_mode, router, A2aMode, A2aState, CatalogEntry, Counters, PROTOCOL_VERSION,
+    a2a_mode, resolve_token, router, A2aMode, A2aState, CatalogEntry, Counters, A2A_TOKEN_FILE_ENV,
+    PROTOCOL_VERSION,
 };
 use signal_mesh::{mesh_armed, MESH_ENABLED_ENV, MESH_REASONER_ENV};
 use std::sync::Arc;
 
 const ADDR_ENV: &str = "NOETL_SIGNAL_MESH_A2A_ADDR";
 const TOKEN_ENV: &str = "NOETL_SIGNAL_MESH_A2A_TOKEN";
+
+/// The MVP's FIXED tier set — the demo's four agents, so a deployed cascade
+/// produces the same pinned `52.5000 / true` the README and tests assert.
+/// ⚠ Fixed on purpose: runtime fan-out is M5, not this milestone.
+fn fixture_agents() -> Vec<Agent> {
+    vec![
+        Agent {
+            id: "t0-temp".into(),
+            tier: 0,
+            how: Reduction::WeightedMean,
+            children: vec![],
+            signal_class: Some("temp".into()),
+            severity: None,
+        },
+        Agent {
+            id: "t0-vibe".into(),
+            tier: 0,
+            how: Reduction::WeightedMean,
+            children: vec![],
+            signal_class: Some("vibe".into()),
+            severity: None,
+        },
+        Agent {
+            id: "t1-site".into(),
+            tier: 1,
+            how: Reduction::WeightedMean,
+            children: vec!["t0-temp".into(), "t0-vibe".into()],
+            signal_class: None,
+            severity: None,
+        },
+        Agent {
+            id: "t2-fleet".into(),
+            tier: 2,
+            how: Reduction::Max,
+            children: vec!["t1-site".into()],
+            signal_class: None,
+            severity: None,
+        },
+    ]
+}
 
 #[tokio::main]
 async fn main() {
@@ -67,6 +110,7 @@ async fn main() {
     // ⚠ Shared, so the metrics listener reads the SAME counters the store
     // increments. A listener holding its own copy renders the startup values
     // forever — an endpoint that answers 200 with numbers that cannot move.
+    let mut checkpoint_secs: Option<u64> = None;
     let store_counters = Arc::new(StoreCounters::new());
     let transport_counters = Arc::new(Counters::new());
     let store: Box<dyn MeshStore> = match selected {
@@ -84,6 +128,33 @@ async fn main() {
                 );
                 std::process::exit(2);
             };
+            // ⚠⚠ A durable store with no checkpoint interval survives PROCESS
+            // loss and not NODE loss, and nothing in the running system would
+            // say so. Refuse rather than ship that asymmetry silently.
+            let secs: u64 = match std::env::var(CHECKPOINT_SECS_ENV) {
+                Ok(v) => match v.trim().parse() {
+                    Ok(n) if n > 0 => n,
+                    _ => {
+                        eprintln!(
+                            "{CHECKPOINT_SECS_ENV}={v:?} is not a positive integer. With \
+                             the ehdb store this bounds how many SECONDS of appends node \
+                             loss costs; there is no safe default."
+                        );
+                        std::process::exit(2);
+                    }
+                },
+                Err(_) => {
+                    eprintln!(
+                        "{}=ehdb requires {CHECKPOINT_SECS_ENV}. Without it the engine \
+                         seals only on 1024 records / 8 MiB, one cascade appends ~29, and \
+                         the tail lives on ONE local disk until a part fills — durable \
+                         against process loss, not node loss.",
+                        signal_mesh::store::STORE_ENV
+                    );
+                    std::process::exit(2);
+                }
+            };
+            checkpoint_secs = Some(secs);
             match EhdbStore::open("mesh-1", &root) {
                 Ok(s) => Box::new(s.with_counters(store_counters.clone())),
                 Err(e) => {
@@ -99,13 +170,13 @@ async fn main() {
             .ok()
             .as_deref(),
     );
-    // ⭐ The metrics listener is INDEPENDENT of the A2A surface. Before M9 the
-    // only `/metrics` rode the A2A router, so a deployment could not be
-    // observed without also exposing its agent surface. Those are different
-    // decisions, so they are different flags.
+
+    let store_label = store.label();
+    let mesh = Mesh::with_store(store, fixture_agents(), 50.0);
+
     let metrics_addr = std::env::var(METRICS_ADDR_ENV).ok();
     if let Some(addr) = metrics_addr.clone() {
-        let label = store.label();
+        let label = store_label;
         // ⚠⚠ Cloned Arcs, NOT a rendered string. Rendering once at startup
         // produces an endpoint that returns 200 with frozen numbers — healthy
         // to every probe and useless to every operator.
@@ -135,7 +206,7 @@ async fn main() {
              Set {}=serve to expose the agent card and the task lifecycle.",
             METRICS_ADDR_ENV,
             metrics_addr,
-            store.label(),
+            store_label,
             signal_mesh::transport::A2A_ENV
         );
         if metrics_addr.is_some() {
@@ -145,7 +216,16 @@ async fn main() {
         return;
     }
 
-    let token = std::env::var(TOKEN_ENV).ok();
+    let token = match resolve_token(
+        std::env::var(A2A_TOKEN_FILE_ENV).ok().as_deref(),
+        std::env::var(TOKEN_ENV).ok().as_deref(),
+    ) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
     if token.is_none() {
         // ⚠ Fail closed and say so. Serving a card that declares a scheme with
         // no token configured would refuse every request while looking like a
@@ -181,12 +261,42 @@ async fn main() {
     };
 
     let addr = std::env::var(ADDR_ENV).unwrap_or_else(|_| "127.0.0.1:8787".into());
-    let state = Arc::new(A2aState::with_counters(
-        mode,
-        entry,
-        token,
-        transport_counters.clone(),
-    ));
+    let state = Arc::new(
+        A2aState::with_counters(mode, entry, token, transport_counters.clone()).with_mesh(mesh),
+    );
+
+    // ⭐ The checkpoint driver, on a dedicated thread, driving the SAME mesh the
+    // request handlers use.
+    //
+    // ⚠ An earlier draft gave the thread its own handle and then MOVED the mesh
+    // into the serving state — leaving the thread looking at `None` and
+    // checkpointing nothing, forever, with the log line still claiming a 30s
+    // window. Driving through the shared state is what makes the timer real,
+    // and `store_checkpoint_total{store="ehdb"}` climbing is what proves it.
+    //
+    // ⚠ A thread, not a tokio task: `checkpoint()` seals and uploads
+    // synchronously, and parking a runtime worker to do that is precisely what
+    // starves the prod writer (noetl/ai-meta#351 — 2 runtime threads vs 4
+    // permitted blocking ops).
+    if let Some(secs) = checkpoint_secs {
+        println!("signal-mesh checkpoint every {secs}s (the node-loss window)");
+        let st = state.clone();
+        std::thread::Builder::new()
+            .name("mesh-checkpoint".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(secs));
+                let mut g = st.mesh.lock().expect("mesh");
+                if let Some(m) = g.as_mut() {
+                    if let Err(e) = m.checkpoint() {
+                        // ⚠ Logged AND counted. A barrier that only bumps a
+                        // counter on success reads identically to one that
+                        // never ran.
+                        eprintln!("checkpoint failed: {e}");
+                    }
+                }
+            })
+            .expect("checkpoint thread spawns");
+    }
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -197,7 +307,7 @@ async fn main() {
     println!("  submit   POST /a2a/tasks");
     println!("  resume   POST /a2a/tasks/{{id}}/resume");
     println!("  metrics  GET  /metrics");
-    println!("  store    {}", store.label());
+    println!("  store    {store_label}");
     axum::serve(listener, app).await.expect("server runs");
 }
 
