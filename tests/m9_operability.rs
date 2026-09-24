@@ -137,6 +137,8 @@ fn every_declared_env_var_is_documented_and_read() {
         ("NOETL_SIGNAL_MESH_ESCALATION", "ESCALATION_ENV"),
         ("NOETL_SIGNAL_MESH_CORRELATION", "CORRELATION_ENV"),
         ("NOETL_SIGNAL_MESH_COVERAGE", "COVERAGE_ENV"),
+        ("NOETL_SIGNAL_MESH_FRESHNESS", "FRESHNESS_ENV"),
+        ("NOETL_SIGNAL_MESH_SEQ_PER_MILLI", "SEQ_PER_MILLI_ENV"),
     ];
 
     // A variable is READ when `serve.rs` — the only thing with a process

@@ -601,7 +601,23 @@ async fn observe(
 }
 
 /// Run the cascade at the current head and persist every event it produces.
-async fn cascade(State(s): State<Arc<A2aState>>, headers: HeaderMap) -> Response {
+/// Body for `POST /mesh/cascade`. Empty is valid.
+///
+/// ⭐ M3 — `up_to_seq` lets a caller name a watermark. ⚠ Without it the gate is
+/// reachable and **unable to fire**: the cascade always read at `log.head()`,
+/// where the staleness is 0 by construction and every policy admits. A gate
+/// that cannot refuse is indistinguishable from one that is not there.
+#[derive(Debug, Default, Deserialize)]
+pub struct CascadeRequest {
+    #[serde(default)]
+    pub up_to_seq: Option<u64>,
+}
+
+async fn cascade(
+    State(s): State<Arc<A2aState>>,
+    headers: HeaderMap,
+    body: Option<Json<CascadeRequest>>,
+) -> Response {
     if !authorized(&s, &headers) {
         Counters::incr(&s.counters.card_refused_unauthenticated);
         return refuse(
@@ -619,8 +635,24 @@ async fn cascade(State(s): State<Arc<A2aState>>, headers: HeaderMap) -> Response
         );
     };
     let head = m.log.head();
-    match m.cascade(head, &DeterministicReasoner) {
-        Ok(v) => Json(verdict_json(&v, head)).into_response(),
+    let at = body.and_then(|Json(b)| b.up_to_seq).unwrap_or(head);
+    match m.cascade(at, &DeterministicReasoner) {
+        Ok(v) => Json(verdict_json(&v, at)).into_response(),
+        // ⚠ A freshness refusal is 409 like any other cascade refusal, but it
+        // carries its OWN error code: a caller that retries a stale read after
+        // waiting is doing the right thing, while retrying a malformed fold is
+        // not, and one code for both would hide which it was.
+        Err(crate::mesh::MeshError::Freshness(w)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "stale-read",
+                "detail": w.to_string(),
+                "requested_up_to": at,
+                "head": head,
+                "retryable": true,
+            })),
+        )
+            .into_response(),
         Err(e) => refuse(StatusCode::CONFLICT, "cascade-refused", e.to_string()),
     }
 }
