@@ -5,9 +5,11 @@ use crate::correlation::{correlate, CorrelationRefusal, CorrelationRule};
 use crate::coverage::Coverage;
 use crate::escalation::{escalation_event, EscalationGate, SeverityPolicy, Suppressed};
 use crate::event::*;
+use crate::fold::FreshnessRefusal;
 use crate::fold::{fold, FoldError, Reduction};
 use crate::react::{run_cycle, Reasoner};
 use crate::store::{MemoryStore, MeshStore, StoreError};
+use ehdb_core::plan::ReadConsistency;
 
 /// One agent in the mesh.
 pub struct Agent {
@@ -113,6 +115,26 @@ pub struct Mesh {
     /// crate's own env-currency guard exists to catch exactly that, and caught
     /// this one.
     pub escalation_armed: bool,
+    /// ⭐ **M3 — the read-consistency policy every tier read is held to.**
+    ///
+    /// ⚠ `Strong` by default, which is `ReadConsistency`'s own `#[default]` and
+    /// reproduces today's behaviour: the cascade reads at a watermark it has
+    /// already reached, so the staleness is 0 and `Strong` admits it.
+    pub read_consistency: ReadConsistency,
+    /// The caller's declared exchange rate between this POC's **sequence** gap
+    /// and M3's **millisecond** budget.
+    ///
+    /// ⚠⚠ There is no correct universal value, which is exactly why it is a
+    /// field rather than a constant. See `fold::admits`.
+    pub seq_per_milli: u64,
+    /// ⭐ M3 arm. Default **false**.
+    ///
+    /// ⚠⚠ The gate is armed separately from the policy. `fold::admits` shipped
+    /// with M1, fully tested, and **zero production callers** — an inert gate,
+    /// the failure class this repo keeps finding. Wiring it without an arm
+    /// would make a freshness refusal a new way for a previously-working
+    /// cascade to fail, on a code path nobody asked to change.
+    pub freshness_armed: bool,
     /// ⭐ M12 arm. Default **false**: without it an aggregate carries
     /// `coverage: None`, which readers must treat as "not assessed" — never as
     /// "complete".
@@ -133,11 +155,23 @@ pub struct Mesh {
 pub enum MeshError {
     Fold(FoldError),
     Store(StoreError),
+    /// ⭐ M3 — the read was not fresh enough for the declared policy.
+    ///
+    /// ⚠ A third variant, not a `Fold`. A stale read and a malformed one want
+    /// different responses: staleness is retryable by waiting, a shape problem
+    /// is not, and a caller that cannot tell them apart will retry the wrong
+    /// one — the same reasoning that split `Fold` from `Store`.
+    Freshness(FreshnessRefusal),
 }
 
 impl From<FoldError> for MeshError {
     fn from(e: FoldError) -> Self {
         MeshError::Fold(e)
+    }
+}
+impl From<FreshnessRefusal> for MeshError {
+    fn from(e: FreshnessRefusal) -> Self {
+        MeshError::Freshness(e)
     }
 }
 impl From<StoreError> for MeshError {
@@ -150,6 +184,7 @@ impl std::fmt::Display for MeshError {
         match self {
             MeshError::Fold(e) => write!(f, "fold refused: {e:?}"),
             MeshError::Store(e) => write!(f, "{e}"),
+            MeshError::Freshness(e) => write!(f, "read refused: {e}"),
         }
     }
 }
@@ -195,7 +230,21 @@ impl Mesh {
             escalation_armed: false,
             correlation_armed: false,
             coverage_armed: false,
+            read_consistency: ReadConsistency::Strong,
+            seq_per_milli: 1,
+            freshness_armed: false,
         }
+    }
+
+    /// Arm the M3 freshness gate, with the policy it enforces.
+    ///
+    /// ⚠ One call sets both, so a policy cannot be configured while the gate
+    /// that reads it stays off — which would look configured and be inert.
+    pub fn arm_freshness(mut self, on: bool, policy: ReadConsistency, seq_per_milli: u64) -> Self {
+        self.freshness_armed = on;
+        self.read_consistency = policy;
+        self.seq_per_milli = seq_per_milli;
+        self
     }
 
     /// Arm M10 event-driven escalation. See [`Mesh::escalation_armed`].
@@ -375,6 +424,25 @@ impl Mesh {
         up_to_seq: u64,
         reasoner: &dyn Reasoner,
     ) -> Result<Verdict, MeshError> {
+        // ⭐⭐ M3 pre-flight — BEFORE the tier loop, because the loop's first act
+        // is to append the A2A `TaskTransitioned` records for the agent it is
+        // about to run.
+        //
+        // ⚠⚠ The per-tier gate below is not sufficient on its own, and the
+        // first build of this shipped believing it was. "Refuses rather than
+        // reduces a short prefix" is a claim about SIDE EFFECTS: checked only
+        // after the fold, the refusal arrives with task events already written
+        // and the log head already moved — which a test asserting only the
+        // return value cannot see. It was caught by asserting the record count.
+        //
+        // Here only `requested - head` is known, never the post-fold staleness,
+        // so this is deliberately the weaker check; it delegates to the SAME
+        // policy (`admits_gap`) rather than re-implementing it.
+        if self.freshness_armed {
+            let gap = up_to_seq.saturating_sub(self.log.head());
+            crate::fold::admits_gap(gap, self.read_consistency, self.seq_per_milli)?;
+        }
+
         let before = self.log.record_count()?;
         let mut tiers: Vec<u8> = self.agents.iter().map(|a| a.tier).collect();
         tiers.sort_unstable();
@@ -440,6 +508,25 @@ impl Mesh {
                 let stream = self.log.stream().to_string();
                 let prefix = self.log.records_up_to(tier_watermark)?;
                 let mut ctx = fold(&prefix, &stream, tier_watermark)?;
+
+                // ⚠⚠ There is deliberately NO per-tier freshness check here.
+                //
+                // One was written, and the planted-defect battery deleted it
+                // without a single test noticing. That is the definition of an
+                // inert gate — the exact failure this milestone exists to fix —
+                // so it is not shipped.
+                //
+                // The reason it could not fire: this log is monotonic and
+                // gapless, so `folded_through == min(up_to_seq, head)` and the
+                // post-fold staleness is always identical to the pre-flight's
+                // `up_to_seq - head`. A second check over the same quantity is
+                // not defence in depth, it is a second thing to maintain that
+                // no test can distinguish from its own absence.
+                //
+                // ⚠ If the store ever admits sequence GAPS, the two diverge —
+                // a watermark inside a gap folds short while `up_to_seq <=
+                // head` — and a per-tier check becomes necessary. Re-add it
+                // then, WITH a test that makes it refuse.
                 if !children.is_empty() {
                     // An aggregator reduces its children only, never raw signals.
                     ctx.inputs.retain(|i| children.contains(&i.agent_id));

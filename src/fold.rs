@@ -246,16 +246,35 @@ pub fn admits(
     consistency: ReadConsistency,
     seq_per_milli: u64,
 ) -> Result<(), FreshnessRefusal> {
+    admits_gap(ctx.staleness(), consistency, seq_per_milli)
+}
+
+/// The same policy, over a **gap** rather than a folded context.
+///
+/// ⚠⚠ Exists because the gate has two honest call sites with different
+/// information available, and the alternative was two implementations of one
+/// policy — which the milestone explicitly forbids ("a thin call onto that path
+/// rather than a parallel implementation").
+///
+/// [`admits`] runs after a fold and knows the real staleness. The pre-flight in
+/// `Mesh::cascade` runs *before anything is written* and only knows
+/// `requested - head`. Both must answer the same question the same way, so both
+/// delegate here.
+pub fn admits_gap(
+    staleness: u64,
+    consistency: ReadConsistency,
+    seq_per_milli: u64,
+) -> Result<(), FreshnessRefusal> {
     match consistency {
         // Strong does not consult a freshness budget at all — it is served by
         // the owner and complete by construction. Same reasoning as
         // `ehdb_l0::closed_timestamp::admits`.
         ReadConsistency::Strong => {
-            if ctx.staleness() == 0 {
+            if staleness == 0 {
                 Ok(())
             } else {
                 Err(FreshnessRefusal::TooStale {
-                    staleness: ctx.staleness(),
+                    staleness,
                     allowed: 0,
                 })
             }
@@ -264,13 +283,10 @@ pub fn admits(
             max_staleness_millis,
         } => {
             let allowed = max_staleness_millis.saturating_mul(seq_per_milli);
-            if ctx.staleness() <= allowed {
+            if staleness <= allowed {
                 Ok(())
             } else {
-                Err(FreshnessRefusal::TooStale {
-                    staleness: ctx.staleness(),
-                    allowed,
-                })
+                Err(FreshnessRefusal::TooStale { staleness, allowed })
             }
         }
         ReadConsistency::Exact { .. } => Err(FreshnessRefusal::ExactUnsupported),

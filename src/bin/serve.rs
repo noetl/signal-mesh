@@ -18,6 +18,7 @@
 //! in a pod env var is exactly what `execution-model.md` forbids for anything
 //! that is not a platform credential.
 
+use ehdb_l0::region_routing::read_consistency_from_env;
 use signal_mesh::a2a::{AgentCard, Capabilities, Skill};
 use signal_mesh::correlation::{correlation_armed, CorrelationRule, CORRELATION_ENV};
 use signal_mesh::coverage::{coverage_armed, COVERAGE_ENV};
@@ -37,6 +38,12 @@ use signal_mesh::{mesh_armed, MESH_ENABLED_ENV, MESH_REASONER_ENV};
 use std::sync::Arc;
 
 const ADDR_ENV: &str = "NOETL_SIGNAL_MESH_A2A_ADDR";
+/// ⭐ M3 arm. The POLICY comes from ehdb's own `NOETL_EHDB_*` pair — one name
+/// for one concept, read through `read_consistency_from_env` rather than
+/// re-parsed here. This flag only decides whether the gate is consulted.
+const FRESHNESS_ENV: &str = "NOETL_SIGNAL_MESH_FRESHNESS";
+/// The sequence-to-millisecond exchange rate. See `fold::admits`.
+const SEQ_PER_MILLI_ENV: &str = "NOETL_SIGNAL_MESH_SEQ_PER_MILLI";
 const TOKEN_ENV: &str = "NOETL_SIGNAL_MESH_A2A_TOKEN";
 
 /// The MVP's FIXED tier set — the demo's four agents, so a deployed cascade
@@ -215,10 +222,34 @@ async fn main() {
     let esc_on = escalation_armed(std::env::var(ESCALATION_ENV).ok().as_deref());
     let corr_on = correlation_armed(std::env::var(CORRELATION_ENV).ok().as_deref());
     let cov_on = coverage_armed(std::env::var(COVERAGE_ENV).ok().as_deref());
+    // ⭐ M3 — the policy is ehdb's, read once, through ehdb.
+    //
+    // ⚠⚠ Fails CLOSED on a malformed value. `read_consistency_from_env`
+    // returns Err for `bounded` with no bound, or an unknown level; defaulting
+    // to Strong there would silently serve a policy nobody configured, and the
+    // operator's typo would look like a working deployment.
+    let policy = match read_consistency_from_env() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "refusing to start: {e}\n\
+                 Set NOETL_EHDB_READ_CONSISTENCY to strong|bounded|exact \
+                 (bounded also needs NOETL_EHDB_MAX_STALENESS_MS)."
+            );
+            std::process::exit(2);
+        }
+    };
+    let fresh_on = mesh_armed(std::env::var(FRESHNESS_ENV).ok().as_deref());
+    let seq_per_milli: u64 = std::env::var(SEQ_PER_MILLI_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1);
+
     let mesh = Mesh::with_store(store, fixture_agents(), 50.0)
         .arm_escalation(esc_on)
         .arm_correlation(corr_on)
-        .arm_coverage(cov_on);
+        .arm_coverage(cov_on)
+        .arm_freshness(fresh_on, policy, seq_per_milli);
 
     let metrics_addr = std::env::var(METRICS_ADDR_ENV).ok();
     if let Some(addr) = metrics_addr.clone() {
@@ -356,6 +387,7 @@ async fn main() {
     // a startup banner should not have to infer the second from the first.
     println!("  escalate POST /mesh/escalate   [escalation armed={esc_on}]");
     println!("  arms     correlation={corr_on} coverage={cov_on}");
+    println!("  freshness gate={fresh_on} policy={policy:?} seq_per_milli={seq_per_milli}");
     println!("  resume   POST /a2a/tasks/{{id}}/resume");
     println!("  metrics  GET  /metrics");
     println!("  store    {store_label}");
