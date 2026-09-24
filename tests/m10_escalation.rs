@@ -12,7 +12,6 @@ use signal_mesh::event::MeshEvent;
 use signal_mesh::fold::Reduction;
 use signal_mesh::mesh::{Agent, Mesh};
 use signal_mesh::react::DeterministicReasoner;
-use signal_mesh::store::MeshStore;
 
 fn policy() -> SeverityPolicy {
     SeverityPolicy::new(70.0, 90.0).expect("valid policy")
