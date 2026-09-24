@@ -198,6 +198,16 @@ impl Mesh {
         }
     }
 
+    /// Arm M10 event-driven escalation. See [`Mesh::escalation_armed`].
+    ///
+    /// ⚠ A builder method alongside `arm_correlation` / `arm_coverage` rather
+    /// than a public field write. Three arms set three different ways is three
+    /// chances to set one of them wrong.
+    pub fn arm_escalation(mut self, on: bool) -> Self {
+        self.escalation_armed = on;
+        self
+    }
+
     /// Arm M12 coverage reporting. See [`Mesh::coverage_armed`].
     pub fn arm_coverage(mut self, on: bool) -> Self {
         self.coverage_armed = on;

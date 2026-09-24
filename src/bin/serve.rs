@@ -19,7 +19,11 @@
 //! that is not a platform credential.
 
 use signal_mesh::a2a::{AgentCard, Capabilities, Skill};
+use signal_mesh::correlation::{correlation_armed, CorrelationRule, CORRELATION_ENV};
+use signal_mesh::coverage::{coverage_armed, COVERAGE_ENV};
+use signal_mesh::escalation::{escalation_armed, SeverityPolicy, ESCALATION_ENV};
 use signal_mesh::fold::Reduction;
+use signal_mesh::mesh::CorrelationSpec;
 use signal_mesh::mesh::{Agent, Mesh};
 use signal_mesh::metrics::{render_all, StoreCounters, METRICS_ADDR_ENV};
 use signal_mesh::store::{
@@ -38,6 +42,24 @@ const TOKEN_ENV: &str = "NOETL_SIGNAL_MESH_A2A_TOKEN";
 /// The MVP's FIXED tier set — the demo's four agents, so a deployed cascade
 /// produces the same pinned `52.5000 / true` the README and tests assert.
 /// ⚠ Fixed on purpose: runtime fan-out is M5, not this milestone.
+///
+/// ⚠⚠ **The tier-0 agents carry a `SeverityPolicy` and `t1-site` carries a
+/// `CorrelationSpec` unconditionally, not only when the flags are set.**
+///
+/// The alternative — build the policy and the spec only when armed — reads
+/// safer and is worse. It makes the topology a function of the environment, so
+/// the shape under test is not the shape deployed, and it hides the thing that
+/// actually matters: *a flag with nothing to act on is reachable and inert.*
+/// Arming `NOETL_SIGNAL_MESH_ESCALATION` against agents that all carry
+/// `severity: None` would return `200 {"escalated": false,
+/// "suppressed": "nominal"}` forever, which is exactly what a working,
+/// correctly-quiet detector returns. That is the failure this repo keeps
+/// finding, and it would have been shipped as a feature.
+///
+/// Declaring them costs nothing while the flags are off: `Mesh::escalate`
+/// tests `escalation_armed` before it looks at any policy, and `correlating`
+/// is `correlation_armed && spec.is_some()`. The pinned demo output is
+/// unchanged — asserted by `the_unarmed_fixture_is_byte_identical_to_today`.
 fn fixture_agents() -> Vec<Agent> {
     vec![
         Agent {
@@ -46,7 +68,8 @@ fn fixture_agents() -> Vec<Agent> {
             how: Reduction::WeightedMean,
             children: vec![],
             signal_class: Some("temp".into()),
-            severity: None,
+            // Bands, not a bare threshold — see SeverityPolicy.
+            severity: SeverityPolicy::new(60.0, 90.0).ok(),
             correlates: None,
         },
         Agent {
@@ -55,7 +78,7 @@ fn fixture_agents() -> Vec<Agent> {
             how: Reduction::WeightedMean,
             children: vec![],
             signal_class: Some("vibe".into()),
-            severity: None,
+            severity: SeverityPolicy::new(60.0, 90.0).ok(),
             correlates: None,
         },
         Agent {
@@ -65,7 +88,15 @@ fn fixture_agents() -> Vec<Agent> {
             children: vec!["t0-temp".into(), "t0-vibe".into()],
             signal_class: None,
             severity: None,
-            correlates: None,
+            // ⚠ `required_branches: 1`, not 2. The fixture's two tier-0 agents
+            // own disjoint signal classes and either may legitimately be
+            // silent; demanding both would make the armed fixture refuse on
+            // ordinary input and look broken. The refusal path is proven in
+            // tests/m11_correlation.rs, not by crippling the demo.
+            correlates: Some(CorrelationSpec {
+                rule: CorrelationRule::WeightedMean,
+                required_branches: 1,
+            }),
         },
         Agent {
             id: "t2-fleet".into(),
@@ -176,7 +207,18 @@ async fn main() {
     );
 
     let store_label = store.label();
-    let mesh = Mesh::with_store(store, fixture_agents(), 50.0);
+
+    // ⭐ The three arms. Each is off unless its variable is exactly `"true"`.
+    // ⚠ Read here, in the one place with a process environment, and threaded
+    // through the builder — not read inside the mesh. A library that reads its
+    // own env is a library you cannot test two ways in one process.
+    let esc_on = escalation_armed(std::env::var(ESCALATION_ENV).ok().as_deref());
+    let corr_on = correlation_armed(std::env::var(CORRELATION_ENV).ok().as_deref());
+    let cov_on = coverage_armed(std::env::var(COVERAGE_ENV).ok().as_deref());
+    let mesh = Mesh::with_store(store, fixture_agents(), 50.0)
+        .arm_escalation(esc_on)
+        .arm_correlation(corr_on)
+        .arm_coverage(cov_on);
 
     let metrics_addr = std::env::var(METRICS_ADDR_ENV).ok();
     if let Some(addr) = metrics_addr.clone() {
@@ -309,6 +351,11 @@ async fn main() {
     println!("signal-mesh A2A [{mode:?}] on http://{addr}");
     println!("  card     GET  /.well-known/agent-card.json");
     println!("  submit   POST /a2a/tasks");
+    // ⚠ Print the ARM STATE, not just the route. A route that is listening and
+    // a capability that is armed are different facts, and an operator reading
+    // a startup banner should not have to infer the second from the first.
+    println!("  escalate POST /mesh/escalate   [escalation armed={esc_on}]");
+    println!("  arms     correlation={corr_on} coverage={cov_on}");
     println!("  resume   POST /a2a/tasks/{{id}}/resume");
     println!("  metrics  GET  /metrics");
     println!("  store    {store_label}");

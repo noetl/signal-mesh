@@ -46,16 +46,18 @@ use crate::event::MeshEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Is event-driven escalation armed? Pure over the raw value.
+/// ⭐ **M10 arm.** Only the exact string `"true"` arms it.
 ///
-/// ⚠ There is deliberately **no `ESCALATION_ENV` constant here yet.** One was
-/// written, and the crate's own env-currency guard refused it: the binary on
-/// this branch has no mesh to arm, so the constant would have been a declared
-/// flag that nothing reads — *documentation of a capability that does not
-/// exist*, which is the precise failure that guard was built to catch. It
-/// caught its author. The constant lands with the HTTP exposure, in the change
-/// that gives it a reader, and it will be named
-/// `NOETL_SIGNAL_MESH_ESCALATION`.
+/// ⚠ This constant did not exist until it had a reader. One was written with
+/// M10 and the crate's own env-currency guard refused it: the binary then had
+/// no mesh to arm, so it would have been a declared flag that nothing reads —
+/// *documentation of a capability that does not exist*, the precise failure
+/// that guard was built to catch. It caught its author. It lands here, in the
+/// change that gives it a reader in `serve.rs`.
+pub const ESCALATION_ENV: &str = "NOETL_SIGNAL_MESH_ESCALATION";
+
+/// Is event-driven escalation armed? Pure over the raw value, so the default
+/// is testable without touching process env.
 pub fn escalation_armed(raw: Option<&str>) -> bool {
     matches!(raw.map(str::trim), Some("true"))
 }

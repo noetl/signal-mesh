@@ -362,6 +362,21 @@ pub struct ObserveSignal {
     pub device_seq: u64,
 }
 
+/// Body for `POST /mesh/escalate`.
+///
+/// ⚠ `at_seq` is supplied by the CALLER, not read from the log head inside
+/// `Mesh::escalate`. M10's first build read the head itself, and appending the
+/// escalation advanced it — so the dedupe key `(agent, band, watermark)` moved
+/// on every call and dedupe never fired. The caller names the watermark it
+/// observed at; that is what makes a duplicate detectable.
+#[derive(Debug, Deserialize)]
+pub struct EscalateRequest {
+    pub agent_id: String,
+    pub value: f64,
+    pub input_count: u32,
+    pub at_seq: u64,
+}
+
 /// Body for `POST /a2a/tasks/{id}/resume`.
 #[derive(Debug, Deserialize)]
 pub struct ResumeTask {
@@ -450,6 +465,70 @@ async fn submit_task(
     let out = task.clone();
     s.tasks.lock().expect("tasks").insert(body.id, task);
     (StatusCode::OK, Json(out)).into_response()
+}
+
+/// ⭐ **M10 — `POST /mesh/escalate`.**
+///
+/// ⚠⚠ A *suppressed* escalation is **200, not an error.** A non-event is a
+/// normal outcome here — most signals are nominal, most repeats are duplicates
+/// — and returning 4xx would train a caller to treat the ordinary case as a
+/// failure and stop reading the reason. The reason is the payload.
+///
+/// ⚠ Returns `armed: false` explicitly rather than pretending. An unarmed mesh
+/// suppresses as `nominal`, which is indistinguishable from a genuinely
+/// nominal value unless the response says which it was — the "absent is not
+/// zero" rule applied to an HTTP body.
+async fn escalate(
+    State(s): State<Arc<A2aState>>,
+    headers: HeaderMap,
+    Json(b): Json<EscalateRequest>,
+) -> Response {
+    if !authorized(&s, &headers) {
+        Counters::incr(&s.counters.card_refused_unauthenticated);
+        return refuse(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "bearer required",
+        );
+    }
+    let mut g = s.mesh.lock().expect("mesh");
+    let Some(m) = g.as_mut() else {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no-mesh",
+            "no cascade attached",
+        );
+    };
+    let armed = m.escalation_armed;
+    match m.escalate(&b.agent_id, b.value, b.input_count, b.at_seq) {
+        Ok(Ok(seq)) => Json(serde_json::json!({
+            "escalated": true,
+            "armed": armed,
+            "seq": seq,
+            "head": m.log.head(),
+        }))
+        .into_response(),
+        Ok(Err(why)) => Json(serde_json::json!({
+            "escalated": false,
+            "armed": armed,
+            "suppressed": suppressed_reason(&why),
+            "head": m.log.head(),
+        }))
+        .into_response(),
+        Err(e) => refuse(StatusCode::BAD_REQUEST, "append-failed", e.to_string()),
+    }
+}
+
+/// A closed-set label for a suppression.
+///
+/// ⚠ Closed on purpose: it is what a metric or an alert keys on, and a free
+/// string here would make an unbounded label set.
+fn suppressed_reason(w: &crate::escalation::Suppressed) -> &'static str {
+    match w {
+        crate::escalation::Suppressed::Nominal => "nominal",
+        crate::escalation::Suppressed::Duplicate => "duplicate",
+        crate::escalation::Suppressed::Backpressure => "backpressure",
+    }
 }
 
 async fn get_task(State(s): State<Arc<A2aState>>, Path(id): Path<String>) -> Response {
@@ -597,10 +676,32 @@ async fn replay(State(s): State<Arc<A2aState>>, headers: HeaderMap) -> Response 
 }
 
 fn verdict_json(v: &Verdict, at: u64) -> serde_json::Value {
+    // ⚠⚠ M12's marker has to leave the process, or arming coverage is a
+    // capability that runs and cannot be observed — which is the same thing as
+    // not running, from the only vantage point that matters to a caller.
+    //
+    // ⚠ `coverage` is `null` when NOT ASSESSED and an object when it was. A
+    // caller must not read the absence as "complete"; the `assessed` field says
+    // which of the two it is, in the body, rather than leaving it to be
+    // inferred from a missing key.
+    let coverage = match &v.coverage {
+        None => serde_json::json!({ "assessed": false }),
+        Some(c) => serde_json::json!({
+            "assessed": true,
+            "expected": c.expected,
+            "present": c.present,
+            "missing": c.missing,
+            "shortfall": c.shortfall(),
+            "reason": c.reason(),
+        }),
+    };
     serde_json::json!({
         "value": v.value, "decision": v.decision,
         "up_to_seq": v.up_to_seq, "events_appended": v.events_appended,
         "cascaded_at_head": at,
+        "degraded": v.degraded,
+        "degraded_reason": v.degraded_reason,
+        "coverage": coverage,
     })
 }
 
@@ -626,6 +727,7 @@ pub fn router(state: Arc<A2aState>) -> Router {
         .route("/a2a/tasks/{id}/resume", post(resume_task))
         .route("/mesh/signals", post(observe))
         .route("/mesh/cascade", post(cascade))
+        .route("/mesh/escalate", post(escalate))
         .route("/mesh/replay", get(replay))
         .route("/metrics", get(metrics))
         .with_state(state)
