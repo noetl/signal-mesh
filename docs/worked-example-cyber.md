@@ -134,7 +134,7 @@ them. Low volume, high value — see §7.2 of the production plan.
 | :-- | :-- | :-- |
 | tier-0 pushes upward on severity | **M10** | ✅ built, flag-gated off; HTTP route rides PR #5 |
 | a role that reads multiple branches | **M11** | ✅ built, flag-gated off; arm is a constructor until PR #5 |
-| a missing branch degrades rather than skews | **M12** | ⛔ not built — today a silently smaller denominator |
+| a missing branch degrades rather than skews | **M12** | ✅ built, flag-gated off; aggregation path only, not tier 0 |
 | per-agent streams so 200 agents do not fold one log | M5 | mechanism yes, partitioning no |
 | a model at the correlator | M4 | ⛔ not built |
 
@@ -142,7 +142,12 @@ them. Low volume, high value — see §7.2 of the production plan.
 running deployment until the `/mesh/*` routes land. **"Exists" and "is on the
 path" are independent questions** — cite the row, not the milestone number.
 
-⚠⚠ M12 is the load-bearing gap that remains. Until it lands, an agent whose
-children are partly missing still reduces over whatever arrived, so a verdict
-can be computed against a quietly smaller denominator. The correlator refuses
-rather than guessing, but the ordinary aggregation path below it does not.
+⚠ M12 now marks a verdict computed over fewer children than were declared, and
+carries the taint upward through tiers that are locally complete. Two limits
+worth stating rather than discovering:
+
+- It covers the **aggregation** path. A tier-0 agent declares no device roster,
+  so "which of the 200 workstations should have reported" is still unanswerable
+  — a silent collector remains invisible at tier 0.
+- It **marks**; it does not decide. Whether a degraded detection is actionable
+  is a policy this milestone deliberately does not set.

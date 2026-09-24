@@ -25,6 +25,7 @@ fn agg(agent: &str, value: f64, count: u32) -> MeshEvent {
         input_count: count,
         up_to_seq: 0,
         population_ids: None,
+        coverage: None,
     })
 }
 

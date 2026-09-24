@@ -69,6 +69,14 @@ pub struct AggregateEmitted {
     /// population exactly as it applies to a metric.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub population_ids: Option<Vec<String>>,
+    /// ⭐ M12 — how much of what this agent DECLARED actually arrived.
+    ///
+    /// ⚠ `None` means the writer did not assess coverage (pre-M12, or a tier-0
+    /// agent, which has no declared roster). It does **not** mean "complete" —
+    /// a reader that treats it as complete has reintroduced exactly the silent
+    /// shortfall this field exists to surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::coverage::Coverage>,
     /// The highest input sequence folded. This is the **bounded-read
     /// watermark** the tier above quotes when it reads this aggregate.
     pub up_to_seq: u64,
@@ -84,6 +92,17 @@ pub struct VerdictSynthesised {
     pub decision: bool,
     pub threshold: f64,
     pub up_to_seq: u64,
+    /// ⭐ M12 — this verdict was computed over less than the declared
+    /// population, somewhere below it.
+    ///
+    /// ⚠ The marker rides the verdict rather than only the aggregate that
+    /// caused it, because the verdict is what a caller reads. A gap three tiers
+    /// down that does not reach here has not been surfaced, only recorded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub degraded: bool,
+    /// The closed-set reason, for a label. Empty when not degraded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub degraded_reason: String,
 }
 
 /// An A2A Task state transition, recorded as an event.

@@ -25,6 +25,7 @@ fn branch(agent: &str, value: f64, count: u32, ids: &[&str]) -> TierInput {
         input_count: count,
         up_to_seq: 0,
         population_ids: Some(ids.iter().map(|s| s.to_string()).collect()),
+        coverage: None,
     }
 }
 
@@ -36,6 +37,7 @@ fn legacy(agent: &str, value: f64, count: u32) -> TierInput {
         input_count: count,
         up_to_seq: 0,
         population_ids: None,
+        coverage: None,
     }
 }
 

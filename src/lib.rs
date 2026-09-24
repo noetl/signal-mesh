@@ -8,6 +8,7 @@
 
 pub mod a2a;
 pub mod correlation;
+pub mod coverage;
 pub mod escalation;
 pub mod event;
 pub mod fold;
