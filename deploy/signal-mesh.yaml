@@ -1,0 +1,134 @@
+# signal-mesh — its own namespace, its own PVC, its own dataset.
+#
+# ⚠⚠ ISOLATION IS THE POINT. This workload shares NOTHING with the prod EHDB
+# tier or the travel paths:
+#   * namespace `signal-mesh`, not `noetl`;
+#   * its own PVC — it never mounts noetl-ehdb-* volumes;
+#   * dataset `mesh_event_log`, never `d1_event_log`;
+#   * no NOETL_COMMAND_BUS_* / NOETL_EVENT_BUS_* / TIER_SERVICE_ADDR, so it
+#     cannot reach noetl-cmdbus-writer even accidentally;
+#   * ClusterIP, no Ingress — nothing routes to it from outside.
+# A second writer against the prod tier is precisely what noetl/ai-meta#351 is
+# about; this must not become one.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: signal-mesh
+  labels:
+    app.kubernetes.io/name: signal-mesh
+    noetl.io/isolated-from: prod-ehdb
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: signal-mesh-store
+  namespace: signal-mesh
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      # ⚠ Size against WRITE RATE x RETENTION, not record count. The cmdbus PVC
+      # filled because manifest size grows with part count while part count
+      # grows with writes — a product of two growing quantities. 1Gi is ample
+      # for a fixed-tier MVP appending ~29 events per cascade; revisit with a
+      # manifest-bytes / part-bytes ratio, not a free-space threshold.
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signal-mesh
+  namespace: signal-mesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: signal-mesh
+  ports:
+    - name: a2a
+      port: 8787
+      targetPort: a2a
+    - name: metrics
+      port: 9797
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: signal-mesh
+  namespace: signal-mesh
+spec:
+  # ⚠ ONE replica, and this is a correctness bound rather than a capacity
+  # choice: the store is a single-writer L0 engine over one RWO volume. A
+  # second replica would be a second writer on the same dataset.
+  replicas: 1
+  serviceName: signal-mesh
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: signal-mesh
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: signal-mesh
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001            # so the PVC is writable by the non-root uid
+      containers:
+        - name: signal-mesh
+          image: ghcr.io/noetl/signal-mesh:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: a2a,     containerPort: 8787 }
+            - { name: metrics, containerPort: 9797 }
+          env:
+            # Only the exact string "true" arms the mesh.
+            - { name: NOETL_SIGNAL_MESH,               value: "true" }
+            - { name: NOETL_SIGNAL_MESH_STORE,         value: "ehdb" }
+            - { name: NOETL_SIGNAL_MESH_STORE_ROOT,    value: "/data/mesh" }
+            # The node-loss window, in seconds. See the deployment spec for why
+            # this is a timer and not a lower seal_max_records.
+            - { name: NOETL_SIGNAL_MESH_CHECKPOINT_SECS, value: "30" }
+            - { name: NOETL_SIGNAL_MESH_A2A,           value: "serve" }
+            - { name: NOETL_SIGNAL_MESH_A2A_ADDR,      value: "0.0.0.0:8787" }
+            - { name: NOETL_SIGNAL_MESH_METRICS_ADDR,  value: "0.0.0.0:9797" }
+            # ⚠⚠ The token arrives as a FILE from a Secret, never as a value.
+            # execution-model.md forbids a bearer in a pod env var; an env value
+            # is visible in `kubectl describe pod` and in this very spec.
+            - { name: NOETL_SIGNAL_MESH_A2A_TOKEN_FILE, value: "/etc/signal-mesh/token" }
+          volumeMounts:
+            - { name: store, mountPath: /data/mesh }
+            - { name: token, mountPath: /etc/signal-mesh, readOnly: true }
+          resources:
+            # CPU-only. The MVP reasoner is deterministic arithmetic — no model,
+            # no GPU — so this is genuinely cheap.
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          readinessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            # ⚠ Generous on purpose. checkpoint() seals and uploads
+            # synchronously; a tight liveness probe would kill the pod mid-flush
+            # and the restart would read as a crash. A CrashLoopBackOff with
+            # exitCode 0 and SIGTERM is a liveness kill, not a crash.
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: store
+          persistentVolumeClaim:
+            claimName: signal-mesh-store
+        - name: token
+          secret:
+            secretName: signal-mesh-a2a-token
+            items:
+              - { key: token, path: token }
+            defaultMode: 0400
