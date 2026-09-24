@@ -104,6 +104,9 @@ pub struct TierInput {
     /// ⭐ M11. `None` = UNKNOWN (a pre-M11 aggregate); `Some(vec![])` = the
     /// agent ran and saw nothing. See `event::AggregateEmitted`.
     pub population_ids: Option<Vec<String>>,
+    /// ⭐ M12 — the coverage this input reported. `None` = not assessed, which
+    /// is NOT the same as complete.
+    pub coverage: Option<crate::coverage::Coverage>,
 }
 
 impl TierContext {
@@ -171,6 +174,7 @@ pub fn fold(records: &[Record], stream: &str, up_to_seq: u64) -> Result<TierCont
                     slot.input_count = a.input_count;
                     slot.up_to_seq = a.up_to_seq;
                     slot.population_ids = a.population_ids.clone();
+                    slot.coverage = a.coverage.clone();
                 } else {
                     ctx.inputs.push(TierInput {
                         agent_id: a.agent_id.clone(),
@@ -178,6 +182,7 @@ pub fn fold(records: &[Record], stream: &str, up_to_seq: u64) -> Result<TierCont
                         input_count: a.input_count,
                         up_to_seq: a.up_to_seq,
                         population_ids: a.population_ids.clone(),
+                        coverage: a.coverage.clone(),
                     });
                 }
             }
@@ -332,11 +337,6 @@ pub fn reduce(ctx: &TierContext, how: Reduction) -> f64 {
     }
 }
 
-/// Total inputs behind a tier's value — the weight it passes upward.
-///
-/// ⚠ A tier must pass the **population size**, not the number of children.
-/// Passing the child count is what turns a weighted mean into a plain one, one
-/// tier up, with no visible symptom.
 /// ⭐ M11 — the identities behind this context's population.
 ///
 /// Tier 0 derives them from the signals' `device_id`; a higher tier unions its
@@ -365,6 +365,18 @@ pub fn population_identities(ctx: &TierContext) -> Vec<String> {
     u.into_iter().map(str::to_string).collect()
 }
 
+/// Total inputs behind a tier's value — the weight it passes upward.
+///
+/// ⚠ A tier must pass the **population size**, not the number of children.
+/// Passing the child count is what turns a weighted mean into a plain one, one
+/// tier up, with no visible symptom.
+///
+/// ⚠⚠ **This counts what ARRIVED, not what was expected.** A child that never
+/// emitted is simply absent from `ctx.inputs`, so the denominator shrinks with
+/// no symptom at all — blueprint §7's "never a silently smaller denominator".
+/// M12 does not change this number (the weight is genuinely what was
+/// observed); it makes the shortfall *visible* alongside it. See
+/// [`coverage`].
 pub fn population(ctx: &TierContext) -> u32 {
     if !ctx.inputs.is_empty() {
         return ctx.inputs.iter().map(|i| i.input_count).sum();

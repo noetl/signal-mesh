@@ -344,6 +344,73 @@ degraded is servable; the fold never hides it.
 degraded marker — and the test asserts the *value* alone would not have moved
 enough to notice, which is why the marker is the fix rather than a threshold.
 
+#### Shipped — 2026-09-24
+
+`src/coverage.rs`, `Agent.children` as the declared expectation,
+`Mesh::arm_coverage` (default **off**). 9 acceptance tests in
+`tests/m12_coverage.rs`; a planted-defect battery of 9 real defects + 1 no-op
+control caught 9/9 with the control surviving.
+
+**⚠⚠ The acceptance criterion above was not testable as written, and finding
+out why is the most useful thing this milestone produced.**
+
+"Removing one child of three" was implemented as *withholding that child's
+signals*. That does not remove it. Every declared agent in `self.agents` runs
+each cascade, so a signal-less agent still emits — a zero-`input_count`
+aggregate, which M11 already models as **known-empty** and which a weighted
+mean correctly gives zero weight. `present` read 3 of 3 and the suite reported
+no degradation, **correctly**. The first battery run was green for the wrong
+reason, and a fixture that cannot exhibit the failure makes every test over it
+decorative.
+
+A declared child is genuinely absent from `ctx.inputs` in exactly three
+situations, and those are what the suite now covers:
+
+| # | cause | test |
+| :-- | :-- | :-- |
+| 1 | **declared but not deployed** — topology drift | `a_missing_child_barely_moves_the_value…` |
+| 2 | **it refused at runtime** — e.g. an M11 correlator that `continue`s without emitting | `a_child_that_refuses_at_runtime_leaves_its_parent_short` |
+| 3 | it has not landed by the watermark (the slow-child case) | covered by the existing staleness path; not separately asserted |
+
+Case 2 is where M11 and M12 meet, and it is the one that arises at runtime
+rather than from a deployment mistake: the correlator refuses, its parent finds
+it absent, and without M12 the parent reduces over nothing and emits a
+confident, finite, entirely ordinary-looking number.
+
+**Design notes.**
+
+- `coverage: Option<Coverage>` — `None` is **not assessed**, never "complete".
+  A reader that treats absent as complete has reintroduced the exact silent
+  shortfall the field exists to surface. A *complete* coverage is written to
+  the wire rather than skipped, so the two stay distinguishable.
+- `degraded` and `shortfall` are **derived**, not stored
+  (`representation-drift.md`: when a value is both stored and derivable, one
+  will be wrong and it is rarely the loud one). The single denormalised bit is
+  `inherited_degraded`, and it is carried because transitivity genuinely cannot
+  be recomputed from one tier of inputs: if C is complete but C's own child was
+  missing, C's numbers read clean and the taint would die at C.
+- `present` counts **declared children that reported**, not reporters. An input
+  from an undeclared agent must not paper over a missing declared one.
+- The marker rides the **verdict**, not only the aggregate that caused the gap.
+  A shortfall three tiers down that never reaches the verdict has been
+  recorded, not surfaced.
+- `reason()` is a closed set (`complete` / `missing_children` / `inherited` /
+  `missing_and_inherited`) so it is safe in a metric label; the missing *ids*
+  are deliberately not in it, because an agent roster is unbounded.
+
+**⚠ Out of scope, deliberately.**
+
+- **Whether a degraded verdict is servable.** That is a deployment policy;
+  inventing one here would ship a knob nobody set. The fold's job is to make
+  the shortfall impossible to miss.
+- **Tier 0.** An aggregator declares its children, so "expected" is written
+  down. A tier-0 agent has no declared device roster — nothing says which of
+  200 workstations *should* have reported — so its expectation would have to be
+  inferred from history. Different design, different milestone.
+- **Reachability over HTTP**, same as M11: the arm is a constructor, because a
+  const with no reader is the defect M9 exists to catch. It becomes an env flag
+  with the `/mesh/*` routes in PR #5.
+
 ---
 
 ## 3. The gap map — each POC non-goal becomes a milestone

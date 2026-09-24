@@ -2,6 +2,7 @@
 
 use crate::a2a::{AgentCard, Capabilities, Skill, Task, TaskState};
 use crate::correlation::{correlate, CorrelationRefusal, CorrelationRule};
+use crate::coverage::Coverage;
 use crate::escalation::{escalation_event, EscalationGate, SeverityPolicy, Suppressed};
 use crate::event::*;
 use crate::fold::{fold, FoldError, Reduction};
@@ -112,6 +113,10 @@ pub struct Mesh {
     /// crate's own env-currency guard exists to catch exactly that, and caught
     /// this one.
     pub escalation_armed: bool,
+    /// ⭐ M12 arm. Default **false**: without it an aggregate carries
+    /// `coverage: None`, which readers must treat as "not assessed" — never as
+    /// "complete".
+    pub coverage_armed: bool,
     /// ⭐ M11 arm. Default **false**: an agent carrying a `CorrelationSpec`
     /// reduces exactly as it did before until this is set, so the flag can be
     /// turned off in production without redeploying a topology.
@@ -155,6 +160,14 @@ impl std::error::Error for MeshError {}
 pub struct Verdict {
     pub value: f64,
     pub decision: bool,
+    /// ⭐ M12 — this number is an answer about less than the declared
+    /// population. ⚠ `false` when coverage was never assessed; read
+    /// [`Verdict::coverage`] to tell "complete" from "not measured".
+    pub degraded: bool,
+    /// The closed-set reason, for a label. Empty when not degraded.
+    pub degraded_reason: String,
+    /// The top agent's coverage. `None` = not assessed, NOT complete.
+    pub coverage: Option<Coverage>,
     pub up_to_seq: u64,
     /// Events appended during this cascade.
     pub events_appended: usize,
@@ -181,7 +194,14 @@ impl Mesh {
             escalations: 0,
             escalation_armed: false,
             correlation_armed: false,
+            coverage_armed: false,
         }
+    }
+
+    /// Arm M12 coverage reporting. See [`Mesh::coverage_armed`].
+    pub fn arm_coverage(mut self, on: bool) -> Self {
+        self.coverage_armed = on;
+        self
     }
 
     /// Arm the M11 correlation tier. See [`Mesh::correlation_armed`].
@@ -351,6 +371,10 @@ impl Mesh {
         tiers.dedup();
 
         let mut last_value = 0.0;
+        // ⭐ M12 — the coverage of whichever agent produced `last_value`. The
+        // taint reaches here through `inherited_degraded`, so this one value
+        // carries a gap from any depth.
+        let mut last_coverage: Option<Coverage> = None;
         let mut top_seq = up_to_seq;
         // Watermark for the tier currently executing. Starts at the caller's
         // bound; advances to the head after each tier completes.
@@ -438,6 +462,24 @@ impl Mesh {
                 // ⭐ M11 — carried on every aggregate so a correlator above can
                 // union rather than sum. Computed before the reduction so it
                 // describes exactly the context that produced the value.
+                // ⭐ M12 — assessed against the DECLARED children, before the
+                // reduction, so the shortfall describes exactly the context
+                // that produced the value.
+                //
+                // ⚠ Tier-0 agents get `None`: they declare no roster, and
+                // `None` means "not assessed", never "complete".
+                let cov = if self.coverage_armed && !children.is_empty() {
+                    let present: Vec<String> =
+                        ctx.inputs.iter().map(|i| i.agent_id.clone()).collect();
+                    let inherited = ctx
+                        .inputs
+                        .iter()
+                        .any(|i| i.coverage.as_ref().is_some_and(Coverage::degraded));
+                    Some(Coverage::assess(&children, &present, inherited))
+                } else {
+                    None
+                };
+
                 let mut pop_ids = crate::fold::population_identities(&ctx);
 
                 // ⭐ M11 — the correlator path. It does NOT run the ordinary
@@ -531,10 +573,12 @@ impl Mesh {
                         value,
                         input_count: pop,
                         population_ids: Some(pop_ids.clone()),
+                        coverage: cov.clone(),
                         up_to_seq: tier_watermark,
                     }))?;
                 top_seq = emitted;
                 last_value = value;
+                last_coverage = cov;
 
                 task.transition(TaskState::Completed)
                     .expect("working->completed");
@@ -551,6 +595,19 @@ impl Mesh {
         }
 
         let decision = last_value >= self.threshold;
+        // ⚠⚠ The marker rides the VERDICT, not only the aggregate that caused
+        // the gap. A caller reads the verdict; a shortfall recorded three tiers
+        // down and never surfaced here has been logged, not surfaced.
+        let degraded = last_coverage.as_ref().is_some_and(Coverage::degraded);
+        let degraded_reason = if degraded {
+            last_coverage
+                .as_ref()
+                .map(|c| c.reason())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        };
         self.log
             .append(MeshEvent::VerdictSynthesised(VerdictSynthesised {
                 agent_id: "top".into(),
@@ -558,10 +615,15 @@ impl Mesh {
                 decision,
                 threshold: self.threshold,
                 up_to_seq: top_seq,
+                degraded,
+                degraded_reason: degraded_reason.clone(),
             }))?;
 
         Ok(Verdict {
             value: last_value,
+            degraded,
+            degraded_reason,
+            coverage: last_coverage,
             decision,
             up_to_seq: top_seq,
             events_appended: self.log.record_count()? - before,

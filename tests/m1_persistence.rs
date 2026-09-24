@@ -466,6 +466,7 @@ fn an_unknown_kind_round_trips_through_the_real_store() {
             input_count: 2,
             up_to_seq: seq_unknown,
             population_ids: None,
+            coverage: None,
         }))
         .expect("append known");
 
