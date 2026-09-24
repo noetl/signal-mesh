@@ -43,6 +43,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// ⭐ **M12 arm.** Only the exact string `"true"` arms it.
+///
+/// ⚠ With it off an aggregate carries `coverage: None`, which readers must
+/// treat as *not assessed* — never as "complete".
+pub const COVERAGE_ENV: &str = "NOETL_SIGNAL_MESH_COVERAGE";
+
+/// Is coverage reporting armed? Pure over the raw value.
+pub fn coverage_armed(raw: Option<&str>) -> bool {
+    matches!(raw.map(str::trim), Some("true"))
+}
+
 /// How much of what an agent expected actually arrived.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Coverage {

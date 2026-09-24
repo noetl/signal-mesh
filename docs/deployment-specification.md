@@ -79,21 +79,16 @@ Every variable the binary reads, with the reason — not just the value.
 | `NOETL_SIGNAL_MESH_CHECKPOINT_SECS` | *(none)* | **yes when `_STORE=ehdb`** | Seconds between durability barriers. ⚠⚠ **No default, and the process refuses to start without it**, because a durable store with no checkpoint survives *process* loss and not *node* loss and nothing running would say so. **Why a timer and not a lower `seal_max_records`:** the record threshold bounds the tail in **appends**, and the dangerous case is when appends *stop* — a half-full part then sits on one local disk indefinitely, so the quieter the mesh the worse the exposure. A timer bounds it in **seconds**, which is the unit node-loss cost is actually measured in, independent of traffic. `ehdb-l0` already shows the trap: `seal_max_age` exists but is only consulted on append. |
 | `NOETL_SIGNAL_MESH_A2A_TOKEN` | *(none)* | **yes when `_A2A=serve`** | Bearer token callers must present. ⚠ Env is acceptable here only because this is a **platform** credential for a dev harness. A business-logic secret belongs in the keychain, referenced by alias — see `execution-model.md`. |
 | `NOETL_SIGNAL_MESH_A2A_ADDR` (write routes) | — | — | ⚠ When `_A2A=serve` the service also exposes **`POST /mesh/signals`**, **`POST /mesh/cascade`** and **`GET /mesh/replay`** on the same port and behind the same bearer. These are the only write paths into the store; without them the service opens a durable volume, checkpoints it, and never writes a byte. |
-| `NOETL_SIGNAL_MESH_ESCALATION` *(⚠ DOES NOT EXIST — see below)* | *(unset)* = off | no | ⭐ **M10 — event-driven escalation.** Arms the path by which a tier-0 agent pushes upward on its own instead of waiting for the scheduled cascade. Only the exact string `true` arms it. ⚠ Additive: the scheduled cascade is untouched and remains the correctness baseline. A *suppressed* escalation returns a reason rather than an error — a non-event is a normal outcome, and it is counted.
+| `NOETL_SIGNAL_MESH_ESCALATION` | *(unset)* = off | no | ⭐ **M10 — event-driven escalation.** Arms the path by which a tier-0 agent pushes upward on its own instead of waiting for the scheduled cascade. Only the exact string `true` arms it. ⚠ Additive: the scheduled cascade is untouched and remains the correctness baseline. A *suppressed* escalation returns a reason rather than an error — a non-event is a normal outcome, and it is counted.
 
-⚠⚠ **Neither this variable nor `POST /mesh/escalate` exists on `main`.** The row
-describes the intended shape, not a knob anyone can set. `Mesh::escalate` is
-called only from `tests/m10_escalation.rs`; the router registers
-`/mesh/signals`, `/mesh/cascade`, `/mesh/replay` and `/metrics`, and nothing
-else. The same is true of M11 and M12: `Mesh::arm_correlation` and
-`Mesh::arm_coverage` have no caller in `serve.rs`, so `Mesh::with_store` leaves
-both `false`.
-
-The earlier note said these would become reachable "with the `/mesh/*` routes".
-That was wrong, and it was wrong in a predictable way: those routes were
-written before M10/M11/M12 existed, so landing them could not have wired
-capabilities that did not yet exist. **Existence and reachability are separate
-questions, and a merge order is not an answer to the second one.** |
+`POST /mesh/escalate` is the endpoint. ⚠ A *suppressed* escalation is **200**,
+not an error — most values are nominal and most repeats are duplicates, so a
+4xx would train a caller to treat the ordinary case as a failure and stop
+reading the reason. The body carries `armed` explicitly, because an unarmed
+mesh suppresses as `nominal`, which is otherwise indistinguishable from a
+working detector with nothing to report. |
+| `NOETL_SIGNAL_MESH_CORRELATION` | *(unset)* = off | no | ⭐ **M11 — the correlation tier.** Arms `t1-site` to correlate across its branches, taking its population as the **union** of contributing identities rather than the sum of their counts. Only the exact string `true` arms it. ⚠ With it off, `t1-site` reduces exactly as before — the `CorrelationSpec` it carries is inert, not absent. |
+| `NOETL_SIGNAL_MESH_COVERAGE` | *(unset)* = off | no | ⭐ **M12 — failure semantics.** Assesses each aggregator against its *declared* children and marks a verdict `degraded` when fewer reported. Only the exact string `true` arms it. ⚠ **Observability only — it must not move the value**, and a test asserts that. With it off an aggregate carries `coverage: None`, which means *not assessed*, never "complete". |
 | `NOETL_SIGNAL_MESH_METRICS_ADDR` | *(unset)* = **no listener** | no | Standalone metrics bind. ⭐ Independent of `_A2A` on purpose: before M9 the only `/metrics` rode the A2A router, so a deployment could not be observed without also exposing its agent surface. |
 
 ### Variables this component does **not** read

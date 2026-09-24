@@ -338,17 +338,36 @@ PR #5". **That was wrong.** #5 does construct a `Mesh` — but it calls
 written before M10, M11 and M12 existed, so it could not have wired them. On
 `main` today:
 
-| capability | in the crate | called from `serve.rs` / the router |
-| :-- | :-- | :-- |
-| `Mesh::escalate` (M10) | ✅ | ⛔ — only `tests/m10_escalation.rs` |
-| `POST /mesh/escalate` | ⛔ not registered | ⛔ |
-| `Mesh::arm_correlation` (M11) | ✅ | ⛔ |
-| `Mesh::arm_coverage` (M12) | ✅ | ⛔ |
+**Wired 2026-09-24**, in its own increment, as the note below predicted it
+would have to be — a route, three env reads, and the arms threaded through
+`serve.rs`:
 
-Wiring them is its own increment: a route, three env reads, and the arms
-threaded through `serve.rs`. **A merge order is not an answer to a reachability
-question** — that was the mistake, and it is the same "exists vs is on the
-path" confusion this repo keeps finding elsewhere.
+| capability | in the crate | reachable | arm |
+| :-- | :-- | :-- | :-- |
+| `Mesh::escalate` (M10) | ✅ | ✅ `POST /mesh/escalate` | `NOETL_SIGNAL_MESH_ESCALATION` |
+| correlation (M11) | ✅ | ✅ via `POST /mesh/cascade` | `NOETL_SIGNAL_MESH_CORRELATION` |
+| coverage (M12) | ✅ | ✅ surfaced on the cascade response | `NOETL_SIGNAL_MESH_COVERAGE` |
+
+All three default **off**, and with them off the demo's output is byte-identical
+to what it was before the wiring.
+
+**A merge order is not an answer to a reachability question** — that was the
+original mistake, and it is the same "exists vs is on the path" confusion this
+repo keeps finding elsewhere.
+
+⚠⚠ The wiring surfaced the *next* shape of it: **reachable and inert.** The
+fixture agents carried `severity: None` and `correlates: None`, so arming the
+flags would have registered a route that answered `200 {"escalated": false,
+"suppressed": "nominal"}` forever — which is exactly what a healthy,
+correctly-quiet detector returns. It would have shipped as a feature. The
+fixture now declares a `SeverityPolicy` on both tier-0 agents and a
+`CorrelationSpec` on `t1-site` *unconditionally* (inert while the flags are
+off), and `the_shipped_fixture_can_actually_escalate` is the guard.
+
+⚠ And a third: M12 was armed but **invisible**. The cascade response carried no
+`degraded` and no `coverage`, so an armed mesh answered a caller identically to
+an unarmed one. The response now carries both, with an explicit
+`coverage.assessed` so *not assessed* cannot be read as *complete*.
 
 ### M12 — Failure semantics ⭐ NEW
 

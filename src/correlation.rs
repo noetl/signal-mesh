@@ -43,6 +43,17 @@
 use crate::fold::TierInput;
 use std::collections::BTreeSet;
 
+/// ⭐ **M11 arm.** Only the exact string `"true"` arms it.
+///
+/// ⚠ Same discipline as [`crate::escalation::ESCALATION_ENV`]: the constant
+/// appears in the change that gives it a reader, never before.
+pub const CORRELATION_ENV: &str = "NOETL_SIGNAL_MESH_CORRELATION";
+
+/// Is the correlation tier armed? Pure over the raw value.
+pub fn correlation_armed(raw: Option<&str>) -> bool {
+    matches!(raw.map(str::trim), Some("true"))
+}
+
 /// Why a correlation could not be computed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CorrelationRefusal {
