@@ -1,0 +1,7 @@
+# ⚠ Anchored with a leading slash. An unanchored `target` also matches
+# `src/target`, `docs/target`, and anything else with that basename — the
+# unanchored-.dockerignore trap the fleet has already paid for once.
+/target
+/.git
+/.github
+/docs

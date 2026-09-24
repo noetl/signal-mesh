@@ -132,6 +132,8 @@ fn every_declared_env_var_is_documented_and_read() {
         ("NOETL_SIGNAL_MESH_A2A_ADDR", "ADDR_ENV"),
         ("NOETL_SIGNAL_MESH_A2A_TOKEN", "TOKEN_ENV"),
         ("NOETL_SIGNAL_MESH_METRICS_ADDR", "METRICS_ADDR_ENV"),
+        ("NOETL_SIGNAL_MESH_CHECKPOINT_SECS", "CHECKPOINT_SECS_ENV"),
+        ("NOETL_SIGNAL_MESH_A2A_TOKEN_FILE", "A2A_TOKEN_FILE_ENV"),
     ];
 
     // A variable is READ when `serve.rs` — the only thing with a process
@@ -182,6 +184,8 @@ fn the_extractor_sees_the_variables_with_digits_in_them() {
         "NOETL_SIGNAL_MESH_REASONER",
         "NOETL_SIGNAL_MESH_STORE",
         "NOETL_SIGNAL_MESH_STORE_ROOT",
+        "NOETL_SIGNAL_MESH_CHECKPOINT_SECS",
+        "NOETL_SIGNAL_MESH_A2A_TOKEN_FILE",
     ] {
         assert!(
             d.contains(required),
