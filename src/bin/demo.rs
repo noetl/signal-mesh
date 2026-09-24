@@ -19,6 +19,7 @@ fn main() {
             how: Reduction::WeightedMean,
             children: vec![],
             signal_class: Some("temp".into()),
+            severity: None,
         },
         Agent {
             id: "t0-vibe".into(),
@@ -26,6 +27,7 @@ fn main() {
             how: Reduction::WeightedMean,
             children: vec![],
             signal_class: Some("vibe".into()),
+            severity: None,
         },
         Agent {
             id: "t1-site".into(),
@@ -33,6 +35,7 @@ fn main() {
             how: Reduction::WeightedMean,
             children: vec!["t0-temp".into(), "t0-vibe".into()],
             signal_class: None,
+            severity: None,
         },
         Agent {
             id: "t2-fleet".into(),
@@ -40,6 +43,7 @@ fn main() {
             how: Reduction::Max,
             children: vec!["t1-site".into()],
             signal_class: None,
+            severity: None,
         },
     ];
     let mut mesh = Mesh::new("exec-demo-1", agents, 50.0);

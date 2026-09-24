@@ -47,14 +47,31 @@ fn read_src(rel: &str) -> String {
 /// the whole set wrong in a direction that still looks plausible.
 fn declared_env_vars() -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    for rel in [
-        "src/lib.rs",
-        "src/store.rs",
-        "src/transport.rs",
-        "src/metrics.rs",
-        "src/bin/serve.rs",
-    ] {
-        let src = read_src(rel);
+    // ⚠⚠ Walk src/ RECURSIVELY. The first version listed five files by hand,
+    // and the moment a new module (`escalation.rs`) declared a variable the
+    // guard simply could not see it — it reported `declared=8` while the crate
+    // declared 9. A hardcoded population is a denominator that silently stops
+    // matching the thing it measures.
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    let mut stack = vec![src_root];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).expect("src is readable") {
+            let path = e.expect("entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(
+        files.len() >= 8,
+        "implausibly few source files found ({}) — the walk is broken",
+        files.len()
+    );
+    for path in files {
+        let src = std::fs::read_to_string(&path).expect("readable");
         for line in src.lines() {
             // Only `const NAME: &str = "NOETL_..."` declarations, so prose
             // mentioning a variable does not enter the read-set. ⚠ A comment

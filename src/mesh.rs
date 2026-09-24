@@ -1,6 +1,7 @@
 //! The mesh: an append-only log, the tier wiring, and the cascade.
 
 use crate::a2a::{AgentCard, Capabilities, Skill, Task, TaskState};
+use crate::escalation::{escalation_event, EscalationGate, SeverityPolicy, Suppressed};
 use crate::event::*;
 use crate::fold::{fold, FoldError, Reduction};
 use crate::react::{run_cycle, Reasoner};
@@ -20,6 +21,9 @@ pub struct Agent {
     /// six signals to the same number — a per-class agent that does not filter
     /// by class is just a duplicate of its sibling.
     pub signal_class: Option<String>,
+    /// ⭐ M10. `Some` makes this agent able to escalate on its own; `None` —
+    /// the default — leaves it exactly as it was, driven only by the cascade.
+    pub severity: Option<SeverityPolicy>,
 }
 
 impl Agent {
@@ -61,6 +65,17 @@ pub struct Mesh {
     pub log: Box<dyn MeshStore>,
     pub agents: Vec<Agent>,
     pub threshold: f64,
+    /// ⭐ M10. Dedupe + backpressure for self-initiated escalations.
+    pub gate: EscalationGate,
+    /// Counted suppressions — ⚠ a suppressed escalation must be visible.
+    pub suppressed_nominal: u64,
+    pub suppressed_duplicate: u64,
+    pub suppressed_backpressure: u64,
+    pub escalations: u64,
+    /// ⚠ M10 is armed per-mesh. A flag that gates nothing is not a flag — the
+    /// crate's own env-currency guard exists to catch exactly that, and caught
+    /// this one.
+    pub escalation_armed: bool,
 }
 
 /// Why a cascade did not produce a verdict.
@@ -117,6 +132,91 @@ impl Mesh {
             log,
             agents,
             threshold,
+            // 32 in flight: enough that a real incident storm is not clipped,
+            // small enough that a chattering agent cannot become the outage.
+            gate: EscalationGate::new(32),
+            suppressed_nominal: 0,
+            suppressed_duplicate: 0,
+            suppressed_backpressure: 0,
+            escalations: 0,
+            escalation_armed: false,
+        }
+    }
+
+    /// ⭐ **M10 — the direction the mesh did not have.**
+    ///
+    /// A tier-0 agent evaluates its own reduced value and, if the severity band
+    /// warrants it, PUSHES upward without waiting to be asked. Returns the
+    /// sequence of the escalation event, or why it was suppressed.
+    ///
+    /// ⚠ Additive: this does not compute a verdict and does not touch the
+    /// per-tier watermark. It asks for a cascade sooner; it never replaces one.
+    /// ⚠⚠ `at_seq` is the watermark of the DATA that triggered this, supplied
+    /// by the caller — it is deliberately **not** `self.log.head()`.
+    ///
+    /// The first implementation read the head here, and the first run of
+    /// `every_suppression_is_counted` caught why that is wrong: appending the
+    /// escalation event **advances the head**, so the next escalation for the
+    /// same badness computes a different key and dedupe never fires. A
+    /// beaconing agent would then escalate on every append forever — precisely
+    /// the outage the gate exists to prevent, reintroduced by the gate's own
+    /// side effect. An escalation is *about* a state of the world at a
+    /// watermark, so the key has to be that watermark.
+    pub fn escalate(
+        &mut self,
+        agent_id: &str,
+        value: f64,
+        input_count: u32,
+        at_seq: u64,
+    ) -> Result<Result<u64, Suppressed>, StoreError> {
+        if !self.escalation_armed {
+            // Unarmed is not an error; it is the default posture.
+            self.suppressed_nominal += 1;
+            return Ok(Err(Suppressed::Nominal));
+        }
+        let Some((tier, policy, parent)) = self.agents.iter().find_map(|a| {
+            if a.id != agent_id {
+                return None;
+            }
+            let p = a.severity.clone()?;
+            // Who to push to: the first agent declaring this one as a child.
+            let parent = self
+                .agents
+                .iter()
+                .find(|c| c.children.iter().any(|x| x == agent_id))
+                .map(|c| c.id.clone())
+                .unwrap_or_else(|| "synthesizer".to_string());
+            Some((a.tier, p, parent))
+        }) else {
+            // No policy = not an escalating agent. Nominal, not an error.
+            self.suppressed_nominal += 1;
+            return Ok(Err(Suppressed::Nominal));
+        };
+
+        let severity = policy.classify(value);
+        let at = at_seq;
+        match self.gate.admit(agent_id, severity, at) {
+            Err(why) => {
+                match why {
+                    Suppressed::Nominal => self.suppressed_nominal += 1,
+                    Suppressed::Duplicate => self.suppressed_duplicate += 1,
+                    Suppressed::Backpressure => self.suppressed_backpressure += 1,
+                }
+                Ok(Err(why))
+            }
+            Ok(()) => {
+                let seq = self.log.append(escalation_event(
+                    agent_id,
+                    tier,
+                    &parent,
+                    severity,
+                    value,
+                    input_count,
+                    at,
+                ))?;
+                self.escalations += 1;
+                Ok(Ok(seq))
+            }
         }
     }
 

@@ -7,6 +7,7 @@
 //! in production, and no generated code is executed anywhere in this crate.
 
 pub mod a2a;
+pub mod escalation;
 pub mod event;
 pub mod fold;
 pub mod mesh;
