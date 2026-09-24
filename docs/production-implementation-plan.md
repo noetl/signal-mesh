@@ -324,13 +324,31 @@ unbounded detail kept out of any label position) and fails its A2A task.
 Skipping silently is how a missing branch becomes an invisible hole in the
 denominator one tier up — which is M12.
 
-**⚠ Not yet reachable over HTTP.** Arming is a constructor
-(`Mesh::arm_correlation`), deliberately **not** an env var: on this base
-`serve.rs` constructs no `Mesh`, so a `NOETL_SIGNAL_MESH_CORRELATION` const
-would have no reader — the readerless-flag defect M9 was built to catch, and
-the reason M10's `ESCALATION_ENV` was removed. The env flag lands with the
-`/mesh/*` routes in PR #5, the same merge-order dependency `/mesh/escalate`
-has.
+**⚠⚠ Not reachable over HTTP, and the stack landing did not change that.**
+
+Arming is a constructor (`Mesh::arm_correlation`), deliberately not an env var:
+when this was written `serve.rs` constructed no `Mesh`, so a
+`NOETL_SIGNAL_MESH_CORRELATION` const would have had no reader — the
+readerless-flag defect M9 was built to catch, and the reason M10's
+`ESCALATION_ENV` was removed.
+
+This section previously said the flag would land "with the `/mesh/*` routes in
+PR #5". **That was wrong.** #5 does construct a `Mesh` — but it calls
+`Mesh::with_store(store, fixture_agents(), 50.0)` and stops there. It was
+written before M10, M11 and M12 existed, so it could not have wired them. On
+`main` today:
+
+| capability | in the crate | called from `serve.rs` / the router |
+| :-- | :-- | :-- |
+| `Mesh::escalate` (M10) | ✅ | ⛔ — only `tests/m10_escalation.rs` |
+| `POST /mesh/escalate` | ⛔ not registered | ⛔ |
+| `Mesh::arm_correlation` (M11) | ✅ | ⛔ |
+| `Mesh::arm_coverage` (M12) | ✅ | ⛔ |
+
+Wiring them is its own increment: a route, three env reads, and the arms
+threaded through `serve.rs`. **A merge order is not an answer to a reachability
+question** — that was the mistake, and it is the same "exists vs is on the
+path" confusion this repo keeps finding elsewhere.
 
 ### M12 — Failure semantics ⭐ NEW
 
@@ -408,8 +426,9 @@ confident, finite, entirely ordinary-looking number.
   200 workstations *should* have reported — so its expectation would have to be
   inferred from history. Different design, different milestone.
 - **Reachability over HTTP**, same as M11: the arm is a constructor, because a
-  const with no reader is the defect M9 exists to catch. It becomes an env flag
-  with the `/mesh/*` routes in PR #5.
+  const with no reader is the defect M9 exists to catch. ⚠ It does **not**
+  become an env flag merely because the `/mesh/*` routes landed — `serve.rs`
+  never calls `arm_coverage`. See the M11 table above.
 
 ---
 

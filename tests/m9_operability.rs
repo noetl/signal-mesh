@@ -457,3 +457,67 @@ fn both_exposition_surfaces_share_one_set_of_transport_counters() {
          render:\n{body}"
     );
 }
+
+/// ⚠⚠ The INVERSE of `every_declared_env_var_is_documented_and_read`, and the
+/// gap that let a false row live on `main`.
+///
+/// That guard walks declared → documented. It cannot see a variable that the
+/// **spec invents**: a table row naming a knob no const declares, which an
+/// operator would read as settable and then find does nothing. On 2026-09-24
+/// the spec carried exactly that — `NOETL_SIGNAL_MESH_ESCALATION`, annotated
+/// "lands with the HTTP exposure", after the HTTP exposure had landed without
+/// it.
+///
+/// ⚠ A documented-but-undeclared variable is allowed **only** when the row says
+/// so explicitly, because the table is also the design record. The marker is
+/// `DOES NOT EXIST`, which is hard to write by accident and easy to grep for.
+#[test]
+fn the_spec_invents_no_env_vars_it_does_not_mark_as_absent() {
+    let declared = declared_env_vars();
+    let spec = read_src("docs/deployment-specification.md");
+
+    // Every NOETL_SIGNAL_MESH* token the spec mentions, in table rows only —
+    // prose may legitimately discuss a variable that does not exist yet.
+    let mut mentioned: Vec<(String, String)> = Vec::new();
+    for line in spec.lines().filter(|l| l.trim_start().starts_with('|')) {
+        let mut rest = line;
+        while let Some(i) = rest.find("NOETL_SIGNAL_MESH") {
+            let tail = &rest[i..];
+            let end = tail
+                .find(|c: char| !c.is_ascii_uppercase() && !c.is_ascii_digit() && c != '_')
+                .unwrap_or(tail.len());
+            mentioned.push((tail[..end].to_string(), line.to_string()));
+            rest = &tail[end..];
+        }
+    }
+
+    // ⚠ Assert the extraction before asserting about it — an empty scan would
+    // pass this guard over nothing, which is the failure mode it exists for.
+    assert!(
+        mentioned.len() >= 8,
+        "implausibly few env vars found in the spec's tables ({}) — the row \
+         scanner is broken and this guard would pass vacuously",
+        mentioned.len()
+    );
+
+    let phantom: Vec<&String> = mentioned
+        .iter()
+        .filter(|(v, row)| !declared.contains(v) && !row.contains("DOES NOT EXIST"))
+        .map(|(v, _)| v)
+        .collect();
+
+    eprintln!(
+        "spec rows: mentions={} distinct_declared={} unmarked_phantoms={}",
+        mentioned.len(),
+        declared.len(),
+        phantom.len()
+    );
+    assert!(
+        phantom.is_empty(),
+        "{} env var(s) documented in a spec table that NO const declares, and \
+         not marked `DOES NOT EXIST`: {phantom:?}. A table row is how an \
+         operator learns a knob exists; inventing one is worse than omitting \
+         it, because the absence is silent at the point of use.",
+        phantom.len()
+    );
+}
