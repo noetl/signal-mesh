@@ -101,6 +101,9 @@ pub enum MeshEvent {
     TaskTransitioned(TaskTransitioned),
     #[serde(rename = "mesh.agent.card_published")]
     AgentCardPublished(AgentCardPublished),
+    /// ⭐ M10 — a tier-0 agent pushed upward on its own initiative.
+    #[serde(rename = "mesh.agent.escalated")]
+    Escalated(crate::escalation::Escalated),
     #[serde(other)]
     Unknown,
 }
@@ -114,6 +117,7 @@ impl MeshEvent {
             MeshEvent::VerdictSynthesised(_) => "mesh.verdict.synthesised",
             MeshEvent::TaskTransitioned(_) => "mesh.task.transitioned",
             MeshEvent::AgentCardPublished(_) => "mesh.agent.card_published",
+            MeshEvent::Escalated(_) => "mesh.agent.escalated",
             MeshEvent::Unknown => return None,
         })
     }
