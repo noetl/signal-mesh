@@ -48,6 +48,27 @@ pub struct AggregateEmitted {
     pub value: f64,
     /// How many tier-below inputs this reduced.
     pub input_count: u32,
+    /// ⭐ M11 — WHICH identities this summarises, not merely how many.
+    ///
+    /// ⚠ `#[serde(default)]` is load-bearing: an aggregate written before M11
+    /// carries no set and must still deserialize, exactly as `event_id` and
+    /// `commit_hlc` did in D1.
+    ///
+    /// ⚠⚠ `Option`, not a bare `Vec`, and the distinction is the whole point:
+    ///
+    /// - `None` — **unknown**. A pre-M11 writer, which cannot be proven not to
+    ///   overlap its siblings. A correlator refuses it rather than falling back
+    ///   to `input_count`, which is the double-count this field exists to stop.
+    /// - `Some(vec![])` — **known-empty**. The agent ran and its class was
+    ///   silent. That is a real, reportable observation.
+    ///
+    /// A bare `Vec` conflates the two, and the first battery run proved it: a
+    /// domain agent with no signals emitted an empty set and the correlator
+    /// refused it as a legacy writer, naming the wrong cause in the record an
+    /// operator would read. "Absent is not zero" applies to an agent's own
+    /// population exactly as it applies to a metric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub population_ids: Option<Vec<String>>,
     /// The highest input sequence folded. This is the **bounded-read
     /// watermark** the tier above quotes when it reads this aggregate.
     pub up_to_seq: u64,
@@ -86,6 +107,25 @@ pub struct AgentCardPublished {
     pub card_digest: String,
 }
 
+/// ⭐ M11 — a correlator declined to produce a value, and said why.
+///
+/// ⚠⚠ This event exists because the alternative is emitting nothing. A
+/// correlator that silently skips leaves the tier above with a denominator
+/// that is quietly one branch smaller, which is the exact failure
+/// `docs/.../blueprint` §7 calls "never a silently smaller denominator". The
+/// refusal is a first-class record so a replay can tell "did not fire" from
+/// "fired and refused".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CorrelationRefused {
+    pub agent_id: String,
+    pub tier: u8,
+    /// A closed-set code — see `mesh::refusal_code`.
+    pub reason: String,
+    /// The human-readable detail. ⚠ Never used as a metric label.
+    pub detail: String,
+    pub up_to_seq: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum MeshEvent {
@@ -95,6 +135,8 @@ pub enum MeshEvent {
     AgentReasoned(AgentReasoned),
     #[serde(rename = "mesh.aggregate.emitted")]
     AggregateEmitted(AggregateEmitted),
+    #[serde(rename = "mesh.correlation.refused")]
+    CorrelationRefused(CorrelationRefused),
     #[serde(rename = "mesh.verdict.synthesised")]
     VerdictSynthesised(VerdictSynthesised),
     #[serde(rename = "mesh.task.transitioned")]
@@ -114,6 +156,7 @@ impl MeshEvent {
             MeshEvent::SignalObserved(_) => "mesh.signal.observed",
             MeshEvent::AgentReasoned(_) => "mesh.agent.reasoned",
             MeshEvent::AggregateEmitted(_) => "mesh.aggregate.emitted",
+            MeshEvent::CorrelationRefused(_) => "mesh.correlation.refused",
             MeshEvent::VerdictSynthesised(_) => "mesh.verdict.synthesised",
             MeshEvent::TaskTransitioned(_) => "mesh.task.transitioned",
             MeshEvent::AgentCardPublished(_) => "mesh.agent.card_published",

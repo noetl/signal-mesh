@@ -4,10 +4,14 @@ The industrial example (temp / vibration / pressure) shows the **shape**. It
 does not show the **hard part**, because a temperature sensor has no adversary
 and its signals do not have to be combined across domains to mean anything.
 
-This is the security worked example the external review asked for. ⚠ Two of the
-capabilities it depends on — **event-driven escalation (M10)** and the
-**correlation tier (M11)** — do not exist yet. They are marked ⛔ below. This
-document is the target, and the honest statement of what is missing from it.
+This is the security worked example the external review asked for.
+**Event-driven escalation (M10)** and the **correlation tier (M11)** have since
+landed and are marked ✅ below; what remains missing is marked ⛔. This document
+is the target, and the honest statement of what is still missing from it.
+
+⚠ Both land **flag-gated and off by default**, and M11's arm is a constructor
+rather than an env var until the `/mesh/*` routes in PR #5 land. "Built" is not
+"reachable in a deployment" — see the state table at the foot of this page.
 
 ---
 
@@ -45,7 +49,7 @@ flowchart TB
         G["id-risk"]
     end
 
-    X["⛔ M11 correlator<br/>reads THREE branches<br/>population = UNION of devices"]
+    X["✅ M11 correlator<br/>reads THREE branches<br/>population = UNION of devices"]
     V(["verdict<br/>one number + one boolean"])
 
     N --> A
@@ -82,9 +86,28 @@ confidence exactly when the signals agree — the worst possible moment to be
 wrong, because agreement is what makes it an incident.
 
 So M11's population is the **union of contributing device identities**, not the
-sum of counts. That is why M11 changes the event model (aggregates must carry a
+sum of counts. That is why M11 changes the event model (aggregates carry a
 population *identity set*, not just a number) rather than merely relaxing a
 filter.
+
+Building it surfaced two consequences this section had not drawn out:
+
+- **The weights move too.** Reporting the union upward is not enough. Weighting
+  a branch by `input_count` reintroduces the same double-count one level down —
+  a branch that saw WS-42 a hundred times would drown three branches that each
+  saw a different host once. The weight is `|identities|`.
+- **An empty identity set is two different facts.** `endpoint` reporting *"I ran
+  and saw nothing"* is a real observation; a pre-M11 aggregate carrying no set
+  at all is an unknown that could overlap its siblings. The first build
+  conflated them and refused a silent branch as a legacy writer — the wrong
+  cause, in the record an analyst reads. They are now `Some(vec![])` and `None`.
+  A silent branch also does **not** satisfy a 3-of-3 requirement: *"network AND
+  endpoint AND identity fired"* must not be satisfiable by two that fired and
+  one that said nothing.
+
+The correlator reports `naive_sum` alongside `population`, so the trap is
+visible in the data rather than only in this paragraph: for the detection above,
+`naive_sum = 3`, `population = 1`, and the difference **is** the double-count.
 
 The industrial example never surfaces this: temp and vibration agents own
 *disjoint* devices, so sum and union coincide. **A worked example that cannot
@@ -109,11 +132,17 @@ them. Low volume, high value — see §7.2 of the production plan.
 
 | need | milestone | state |
 | :-- | :-- | :-- |
-| tier-0 pushes upward on severity | **M10** | ⛔ not built |
-| a role that reads multiple branches | **M11** | ⛔ not built |
+| tier-0 pushes upward on severity | **M10** | ✅ built, flag-gated off; HTTP route rides PR #5 |
+| a role that reads multiple branches | **M11** | ✅ built, flag-gated off; arm is a constructor until PR #5 |
 | a missing branch degrades rather than skews | **M12** | ⛔ not built — today a silently smaller denominator |
 | per-agent streams so 200 agents do not fold one log | M5 | mechanism yes, partitioning no |
 | a model at the correlator | M4 | ⛔ not built |
 
-⚠ Until M10 and M11 land, this page describes an intent. Nothing here should be
-cited as a capability.
+⚠ M10 and M11 exist in code and are proven by test; neither is reachable in a
+running deployment until the `/mesh/*` routes land. **"Exists" and "is on the
+path" are independent questions** — cite the row, not the milestone number.
+
+⚠⚠ M12 is the load-bearing gap that remains. Until it lands, an agent whose
+children are partly missing still reduces over whatever arrived, so a verdict
+can be computed against a quietly smaller denominator. The correlator refuses
+rather than guessing, but the ordinary aggregation path below it does not.
