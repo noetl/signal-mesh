@@ -77,7 +77,10 @@ spec:
         fsGroup: 10001            # so the PVC is writable by the non-root uid
       containers:
         - name: signal-mesh
-          image: ghcr.io/noetl/signal-mesh:dev
+          # ⚠ BY DIGEST, not by tag — the house convention. A tag is a mutable
+          # pointer; a digest is the thing that was tested. Built for
+          # linux/amd64 to match the cluster nodes (local is arm64).
+          image: us-central1-docker.pkg.dev/shastaratech-noetl-prod/noetl/signal-mesh@sha256:0aa1cc074f7bf8ae13f16ad5226e3a54c6f6f06f1704ce3c66b396aba1194ecf
           imagePullPolicy: IfNotPresent
           ports:
             - { name: a2a,     containerPort: 8787 }
