@@ -162,6 +162,136 @@ exist.
 
 ---
 
+## 2.5 ⭐ External review, 2026-09-24 (Nick / cybx) — verified against the code
+
+An external review against the original requirements found six gaps. **All six
+are confirmed**, one is worse than reported, and one is partially addressed. The
+top two are the *core* requirement and re-order the roadmap: they come before
+the remaining read-side M-series work.
+
+| # | review's claim | verdict | evidence |
+| :-- | :-- | :-- | :-- |
+| 1 | The cascade is **top-initiated**, so this is periodic scoring, not escalation | ✅ **CONFIRMED** | `mesh.rs:229` `Task::submit(&task_id, "dispatcher", &id, …)` — a synthetic dispatcher submits *downward* to every agent; blueprint §5 shows `TOP->>T1` / `T1->>T0`. Nothing is triggered from below. |
+| 2 | **No correlation tier** — siblings invisible, aggregators see only direct children, tier 0 is single-class | ✅ **CONFIRMED** | `mesh.rs:257` `ctx.inputs.retain(\|i\| children.contains(&i.agent_id))`; `:258` `ctx.signals.clear()`; `:266` tier-0 filters to one `signal_class`. Network + endpoint + identity cannot combine. |
+| 3 | **Per-agent streams not built** — the quadratic shared-log problem | ⚠️ **PARTLY ADDRESSED** | The *mechanism* exists — fork F-1 made `index_key` the stream (`store.rs`), and `read_index_after` prunes to one partition. The *partitioning* does not: `serve.rs:114,154` open a single hardcoded stream `"mesh-1"`, so every agent still folds one shared log. Mechanism real, benefit unrealised. |
+| 4 | Reasoner is **scripted arithmetic** | ✅ **CONFIRMED** | `react.rs:56,64` — `Reasoner` has exactly one impl, `DeterministicReasoner`. |
+| 5 | **No failure semantics** for a missing child | ✅ **CONFIRMED, and worse than reported** | See below. |
+| 6 | No **cyber** worked example | ✅ **CONFIRMED** | Only temp/vibration/pressure. The `security` hits in the tree are `securitySchemes` on the Agent Card — a different sense of the word. |
+
+### ⚠⚠ #5 is the sharpest finding: the document states the rule, the code breaks it
+
+Blueprint §7 says plainly: *"a dropped signal must be visible as a **gap**, never
+as a silently smaller denominator."* `fold.rs` does the opposite:
+
+```rust
+pub fn population(ctx: &TierContext) -> u32 {
+    if !ctx.inputs.is_empty() {
+        return ctx.inputs.iter().map(|i| i.input_count).sum();   // present inputs ONLY
+    }
+    ctx.signals.len() as u32
+}
+```
+
+A child that never emitted is simply **absent** from `ctx.inputs`. The weighted
+mean is then computed over the survivors and the denominator shrinks silently —
+a confident, well-formed, entirely wrong number, with no error anywhere. This is
+the project's own recurring failure class (*absent is not zero*) sitting in its
+own arithmetic, and it is exactly the shape the POC's `weighted_mean_respects_
+population_not_child_count` test was written to catch one level up.
+
+⭐ **Reference implementation:** the review notes that the **SRE incident-triage
+demo** already exhibits the event-driven + correlating pattern this mesh lacks.
+It is the closest working example of the target shape and should be read before
+designing M10/M11 rather than after.
+
+### Re-prioritised roadmap
+
+The two core gaps become **M10** and **M11** and run *before* the remaining
+read-side work. The M-series is renumbered by priority, not by invention date:
+
+| order | milestone | status |
+| :-- | :-- | :-- |
+| 1 | **M10 — event-driven escalation** | ⭐ NEW. The #1 gap. |
+| 2 | **M11 — correlation tier** | ⭐ NEW. The #2 gap. |
+| 3 | **M12 — failure semantics** | ⭐ NEW (review #5). Small, and it protects every number above it, so it lands early. |
+| 4 | M3 — bounded-staleness reads | ehdb side **done** ([noetl/ehdb#368](https://github.com/noetl/ehdb/pull/368)); consuming half open |
+| 5 | M5 — per-agent streams + collectors | review #3: finish the partitioning the mechanism already supports |
+| 6 | M4 — model-backed reasoner | review #4, via the ops#311 backend |
+| 7 | M7 — scale proof, with the numbers in §7.1 | review #3 |
+| 8 | M6, M8 | unchanged |
+
+---
+
+### M10 — Event-driven escalation ⭐ NEW
+
+**The gap.** A tier-0 agent cannot say anything until it is asked. That makes
+the mesh a *periodic scorer*; the requirement is *"escalate the moment a device
+starts beaconing to C2."*
+
+**Design.** Escalation is **additive** — the scheduled cascade is untouched and
+remains the correctness baseline. A tier-0 agent that crosses a severity
+threshold **pushes** a Task upward on its own.
+
+- **Trigger:** a per-agent `severity` predicate over the reduced value —
+  threshold crossing, or rate-of-change over a window (log-growth). Evaluated
+  at `act`, where the value already exists.
+- **Transport:** A2A push. The card already advertises
+  `capabilities.pushNotifications: true`, which is currently a **claim with no
+  implementation** — M10 makes it true or must stop advertising it.
+- **Dedupe:** an escalation carries the `(agent, watermark, severity_band)` it
+  fired for. The same band at the same watermark escalates **once**. ⚠ Without
+  this a beaconing device escalates on every append forever.
+- **Backpressure:** bound the *escalation path*, never the ingest — a dropped
+  escalation must be a counted gap, not a smaller denominator. Same rule as the
+  collector.
+
+**Acceptance.** A tier-0 signal above threshold produces an upward Task **with
+no cascade call**; below threshold produces none (the discriminating control);
+the same band at the same watermark fires once; a suppressed escalation is
+counted; and the scheduled cascade still yields the pinned `52.5000`.
+
+**Flag** `NOETL_SIGNAL_MESH_ESCALATION` (off). **Blast radius:** additive path,
+off by default. **Rollback:** unset.
+
+### M11 — Correlation tier ⭐ NEW
+
+**The gap.** `retain(children.contains(…))` means an aggregator sees only its
+direct children; tier-0 sees one `signal_class`. Network + endpoint + identity
+signals cannot combine into one detection.
+
+**Design — a correlation ROLE, not a wider aggregator.** A correlator may read
+**multiple branches**, which is exactly what breaks the weighting invariant if
+done naively, so the invariant is preserved explicitly:
+
+- ⚠⚠ **Populations must not be double-counted.** Two branches that share an
+  underlying signal would otherwise contribute it twice. A correlator's
+  population is the **union** of contributing signal identities, not the sum of
+  its inputs' `input_count`. That requires aggregates to carry a *population
+  identity set* (or a sketch), not just a count — the one real change to the
+  event model.
+- A correlator declares its own weighting, and it **may not** be an ancestor of
+  another correlator whose population overlaps, until the union is proven.
+- Correlation output is a distinct event kind so a verdict can say *which*
+  branches combined.
+
+**Acceptance.** A correlator over two branches sharing one device counts that
+device **once**; a positive control with disjoint branches sums normally; and
+the existing single-parent weighting tests still pass unchanged.
+
+### M12 — Failure semantics ⭐ NEW
+
+**Design.** An agent declares its **expected** children. At reduce time,
+`expected − present` is the gap. The aggregate carries `expected_count`,
+`present_count` and the missing ids; a verdict computed over a short population
+is **marked degraded** rather than silently emitted. Policy decides whether
+degraded is servable; the fold never hides it.
+
+**Acceptance.** Removing one child of three changes `present_count` and sets the
+degraded marker — and the test asserts the *value* alone would not have moved
+enough to notice, which is why the marker is the fix rather than a threshold.
+
+---
+
 ## 3. The gap map — each POC non-goal becomes a milestone
 
 Spec §11's eight items, mapped:
@@ -489,6 +619,43 @@ call them validated.
 signals/s** sustained, across **4 collector shards**, into a **3-tier** mesh of
 ~**200** tier-0 agents, ~**20** tier-1, **1** synthesizer. Cascade end-to-end
 **p95 < 5 s** at a named watermark.
+
+### 7.1 ⭐ The scale plan, with numbers (review #3)
+
+⚠ Still **design targets**, not a measurement — but now concrete enough to be
+wrong in public, which the previous "thousands × thousands" was not.
+
+| dimension | target | why this number |
+| :-- | --: | :-- |
+| devices per collector shard | **2,500** | at 1 signal/device/10 s that is 250 ev/s per shard — an order below the ~500 ev/day the embedded prod engine handles today, so headroom is deliberate |
+| shards | **4** | 10,000 devices. ⚠ `DEFAULT_SHARD_COUNT` is **1**; sharding is opt-in, so a deployment that forgets it silently gets one shard |
+| tier-0 agents | **200** | one per device-class × shard; each folds **its own** stream (M5), not the shared log |
+| tier-1 aggregators | **20** | fan-in 10 |
+| correlators (M11) | **4** | one per detection family; each reads ≤ 3 branches |
+| synthesizer | **1** | |
+| records per agent fold | **≤ 2,000** | the whole point of per-agent streams: without them each of 200 agents folds a 10,000-record shared log — 2 × 10⁶ record-reads per cascade, quadratic in agents |
+| escalation p95 (M10) | **< 2 s** signal → tier-0 push | the "beaconing to C2" requirement; the scheduled cascade's 5 s budget is for *scoring*, not *escalation* |
+| scheduled cascade p95 | **< 5 s** at a named watermark | unchanged |
+
+**Measured so far (Phase 1, live, single fixed tier set):** signal ingest
+**0.24 s**, full 3-tier cascade **0.29 s** — both upper bounds, measured through
+a port-forward from a workstation. They say the shape is cheap; they say nothing
+about 10,000 devices.
+
+### 7.2 ⚠ Where an LLM is worth the cost — and where it is not
+
+The review asks this directly, and the honest answer is *mostly not*.
+
+| layer | reasoner | why |
+| :-- | :-- | :-- |
+| **tier 0** (per device/class) | **deterministic** | 200 agents × every append. A model here is the dominant cost of the whole system and the decision is a threshold comparison. The floor already holds 100% schema validity. |
+| **tier 1** (aggregation) | **deterministic** | arithmetic over children. There is nothing to reason about. |
+| **M11 correlation** | ⭐ **model, gated** | the one place judgement pays: *"is this beacon + this new admin token + this lateral connection one incident or three coincidences?"* Low call volume (4 correlators, only on escalation), high value per call. |
+| **synthesizer** | deterministic + model **for the narrative only** | the number and the boolean stay reproducible; a model may write the explanation, and a replay must reproduce the number whether or not the narrative is present. |
+
+⚠ The travel SLM track already measured the trap: raw `gemini-2.5-pro` with no
+schema enforcement scored **below** the deterministic floor. Put the model where
+the floor cannot reach, not on top of it.
 
 **How it is proven**
 
