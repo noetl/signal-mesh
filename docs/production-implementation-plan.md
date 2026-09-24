@@ -278,6 +278,60 @@ done naively, so the invariant is preserved explicitly:
 device **once**; a positive control with disjoint branches sums normally; and
 the existing single-parent weighting tests still pass unchanged.
 
+#### Shipped — 2026-09-24
+
+`src/correlation.rs`, `Agent::correlates`, `Mesh::arm_correlation` (default
+**off**). 14 acceptance tests in `tests/m11_correlation.rs`; a planted-defect
+battery of 10 real defects + 1 no-op control caught 10/10 with the control
+surviving.
+
+Three things the build found that this section did not anticipate:
+
+1. **The class filter narrowed values without narrowing identities.** `mesh.rs`
+   restricted `ctx.signals` to a tier-0 agent's own `signal_class` while
+   `signal_ids` still held every device, so a per-class agent's population would
+   have been the identities of signals it did not reduce. A `debug_assert` on
+   the positional invariant caught it on the first run — the invariant was worth
+   more than the test that was supposed to check it.
+
+2. **`population_ids` had to become `Option`, not `Vec`.** An empty set
+   conflated *"the agent ran and its class was silent"* with *"a pre-M11 writer
+   carries no set at all"*. The first battery run refused a silent domain agent
+   as `unknown_population`, naming the wrong cause in the record an operator
+   reads. `None` is unknown and is refused; `Some(vec![])` is a real observation
+   that contributes nothing and weighs nothing. **"Absent is not zero" applies
+   to an agent's own population exactly as it applies to a metric.**
+
+   It also settled an arity question the section left open: a silent branch does
+   **not** satisfy `required_branches`. Letting it would turn *"network AND
+   endpoint AND identity fired"* into a weaker claim wearing the stronger
+   claim's name.
+
+3. **The weights had to move to identities too.** This section said the union
+   changes the *reported* population. That is not sufficient — weighting by
+   `input_count` reintroduces the double-count one level down, where a branch
+   that saw one host a hundred times outweighs three branches that each saw a
+   different host once. Weight is `|identities|`.
+
+**Observability.** `Correlated::naive_sum` carries what summing the branches'
+populations would have given, so `naive_sum − population` is exactly the number
+of double-counted identities — the overlap is *observable rather than asserted*,
+and a reader does not have to trust that the union ran.
+
+**Refusals are events.** A correlator that cannot produce a value emits no
+aggregate but does emit `mesh.correlation.refused` (closed-set `reason`,
+unbounded detail kept out of any label position) and fails its A2A task.
+Skipping silently is how a missing branch becomes an invisible hole in the
+denominator one tier up — which is M12.
+
+**⚠ Not yet reachable over HTTP.** Arming is a constructor
+(`Mesh::arm_correlation`), deliberately **not** an env var: on this base
+`serve.rs` constructs no `Mesh`, so a `NOETL_SIGNAL_MESH_CORRELATION` const
+would have no reader — the readerless-flag defect M9 was built to catch, and
+the reason M10's `ESCALATION_ENV` was removed. The env flag lands with the
+`/mesh/*` routes in PR #5, the same merge-order dependency `/mesh/escalate`
+has.
+
 ### M12 — Failure semantics ⭐ NEW
 
 **Design.** An agent declares its **expected** children. At reduce time,

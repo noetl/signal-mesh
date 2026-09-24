@@ -24,6 +24,7 @@ fn agg(agent: &str, value: f64, count: u32) -> MeshEvent {
         value,
         input_count: count,
         up_to_seq: 0,
+        population_ids: None,
     })
 }
 
@@ -187,6 +188,7 @@ fn the_cascade_is_deterministic_and_replayable() {
                 children: vec![],
                 signal_class: Some("temp".into()),
                 severity: None,
+                correlates: None,
             },
             Agent {
                 id: "t1".into(),
@@ -195,6 +197,7 @@ fn the_cascade_is_deterministic_and_replayable() {
                 children: vec!["t0-a".into()],
                 signal_class: None,
                 severity: None,
+                correlates: None,
             },
         ]
     };
@@ -224,6 +227,7 @@ fn every_decision_leaves_a_replayable_trace() {
         children: vec![],
         signal_class: Some("c".into()),
         severity: None,
+        correlates: None,
     }];
     let mut m = Mesh::new("s", agents, 1.0);
     m.publish_cards().expect("cards");

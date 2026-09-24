@@ -27,6 +27,7 @@ fn agents() -> Vec<Agent> {
             children: vec![],
             signal_class: Some("net".into()),
             severity: Some(policy()),
+            correlates: None,
         },
         Agent {
             id: "t1-net".into(),
@@ -35,6 +36,7 @@ fn agents() -> Vec<Agent> {
             children: vec!["t0-beacon".into()],
             signal_class: None,
             severity: None,
+            correlates: None,
         },
     ]
 }
@@ -265,6 +267,7 @@ fn escalation_does_not_change_the_scheduled_cascade() {
                 children: vec![],
                 signal_class: Some("temp".into()),
                 severity: None,
+                correlates: None,
             },
             Agent {
                 id: "t0-vibe".into(),
@@ -273,6 +276,7 @@ fn escalation_does_not_change_the_scheduled_cascade() {
                 children: vec![],
                 signal_class: Some("vibe".into()),
                 severity: None,
+                correlates: None,
             },
             Agent {
                 id: "t1-site".into(),
@@ -281,6 +285,7 @@ fn escalation_does_not_change_the_scheduled_cascade() {
                 children: vec!["t0-temp".into(), "t0-vibe".into()],
                 signal_class: None,
                 severity: None,
+                correlates: None,
             },
             Agent {
                 id: "t2-fleet".into(),
@@ -289,6 +294,7 @@ fn escalation_does_not_change_the_scheduled_cascade() {
                 children: vec!["t1-site".into()],
                 signal_class: None,
                 severity: None,
+                correlates: None,
             },
         ]
     };

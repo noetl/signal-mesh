@@ -51,6 +51,11 @@ impl std::fmt::Display for FoldError {
 pub struct TierContext {
     /// Raw signal values visible in the prefix (tier 0 input).
     pub signals: Vec<f64>,
+    /// ⭐ M11 — the device identity behind each entry in `signals`, positionally
+    /// aligned. ⚠ Parallel vectors rather than a `Vec<(String, f64)>` so every
+    /// existing reader of `signals` keeps working unchanged; the invariant that
+    /// they stay the same length is asserted in `population_identities`.
+    pub signal_ids: Vec<String>,
     /// Aggregates emitted by the tier below, most recent per agent.
     pub inputs: Vec<TierInput>,
     /// Highest sequence actually folded. ⚠ May be **less** than the requested
@@ -96,6 +101,9 @@ pub struct TierInput {
     pub value: f64,
     pub input_count: u32,
     pub up_to_seq: u64,
+    /// ⭐ M11. `None` = UNKNOWN (a pre-M11 aggregate); `Some(vec![])` = the
+    /// agent ran and saw nothing. See `event::AggregateEmitted`.
+    pub population_ids: Option<Vec<String>>,
 }
 
 impl TierContext {
@@ -151,7 +159,10 @@ pub fn fold(records: &[Record], stream: &str, up_to_seq: u64) -> Result<TierCont
         ctx.folded_through = r.seq;
 
         match &r.payload {
-            MeshEvent::SignalObserved(s) => ctx.signals.push(s.value),
+            MeshEvent::SignalObserved(s) => {
+                ctx.signals.push(s.value);
+                ctx.signal_ids.push(s.device_id.clone());
+            }
             MeshEvent::AggregateEmitted(a) => {
                 // Last-writer-wins per agent, in sequence order. Keeps the
                 // result independent of how many times a tier re-emitted.
@@ -159,12 +170,14 @@ pub fn fold(records: &[Record], stream: &str, up_to_seq: u64) -> Result<TierCont
                     slot.value = a.value;
                     slot.input_count = a.input_count;
                     slot.up_to_seq = a.up_to_seq;
+                    slot.population_ids = a.population_ids.clone();
                 } else {
                     ctx.inputs.push(TierInput {
                         agent_id: a.agent_id.clone(),
                         value: a.value,
                         input_count: a.input_count,
                         up_to_seq: a.up_to_seq,
+                        population_ids: a.population_ids.clone(),
                     });
                 }
             }
@@ -324,6 +337,34 @@ pub fn reduce(ctx: &TierContext, how: Reduction) -> f64 {
 /// ⚠ A tier must pass the **population size**, not the number of children.
 /// Passing the child count is what turns a weighted mean into a plain one, one
 /// tier up, with no visible symptom.
+/// ⭐ M11 — the identities behind this context's population.
+///
+/// Tier 0 derives them from the signals' `device_id`; a higher tier unions its
+/// inputs'. ⚠ An input that carries none contributes none — it does NOT fall
+/// back to its count, because a count cannot be unioned and pretending
+/// otherwise is the double-count `correlation.rs` exists to prevent.
+pub fn population_identities(ctx: &TierContext) -> Vec<String> {
+    use std::collections::BTreeSet;
+    // ⚠ The parallel-vector invariant, asserted rather than assumed: a
+    // mismatch would silently mis-attribute identities to values.
+    debug_assert_eq!(
+        ctx.signals.len(),
+        ctx.signal_ids.len(),
+        "signals and signal_ids must stay positionally aligned"
+    );
+    if !ctx.inputs.is_empty() {
+        let mut u: BTreeSet<&str> = BTreeSet::new();
+        for i in &ctx.inputs {
+            for id in i.population_ids.iter().flatten() {
+                u.insert(id.as_str());
+            }
+        }
+        return u.into_iter().map(str::to_string).collect();
+    }
+    let u: BTreeSet<&str> = ctx.signal_ids.iter().map(String::as_str).collect();
+    u.into_iter().map(str::to_string).collect()
+}
+
 pub fn population(ctx: &TierContext) -> u32 {
     if !ctx.inputs.is_empty() {
         return ctx.inputs.iter().map(|i| i.input_count).sum();

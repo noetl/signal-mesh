@@ -1,6 +1,7 @@
 //! The mesh: an append-only log, the tier wiring, and the cascade.
 
 use crate::a2a::{AgentCard, Capabilities, Skill, Task, TaskState};
+use crate::correlation::{correlate, CorrelationRefusal, CorrelationRule};
 use crate::escalation::{escalation_event, EscalationGate, SeverityPolicy, Suppressed};
 use crate::event::*;
 use crate::fold::{fold, FoldError, Reduction};
@@ -24,6 +25,41 @@ pub struct Agent {
     /// ⭐ M10. `Some` makes this agent able to escalate on its own; `None` —
     /// the default — leaves it exactly as it was, driven only by the cascade.
     pub severity: Option<SeverityPolicy>,
+    /// ⭐ M11 — when `Some`, this agent is a **correlator**: it combines
+    /// sibling branches (network + endpoint + identity) into one detection,
+    /// and its population is the **union** of its branches' identities rather
+    /// than the sum of their counts.
+    ///
+    /// ⚠ `None` is the ordinary aggregator and its arithmetic is untouched. A
+    /// single-parent tier has no overlap to resolve, so switching it to sets
+    /// would be cost with no correctness gain.
+    pub correlates: Option<CorrelationSpec>,
+}
+
+/// How a correlator combines its branches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorrelationSpec {
+    pub rule: CorrelationRule,
+    /// ⚠ Below this many branches the correlator **refuses** rather than
+    /// correlating over whatever happened to arrive. A detection built from
+    /// two of three domains is not the same claim as one built from three,
+    /// and silently making it is the failure M12 generalises.
+    pub required_branches: usize,
+}
+
+impl Agent {
+    /// An ordinary reducer — the shape every pre-M11 agent has.
+    pub fn reducer(id: &str, tier: u8, how: Reduction, children: Vec<String>) -> Self {
+        Agent {
+            id: id.into(),
+            tier,
+            how,
+            children,
+            signal_class: None,
+            severity: None,
+            correlates: None,
+        }
+    }
 }
 
 impl Agent {
@@ -76,6 +112,10 @@ pub struct Mesh {
     /// crate's own env-currency guard exists to catch exactly that, and caught
     /// this one.
     pub escalation_armed: bool,
+    /// ⭐ M11 arm. Default **false**: an agent carrying a `CorrelationSpec`
+    /// reduces exactly as it did before until this is set, so the flag can be
+    /// turned off in production without redeploying a topology.
+    pub correlation_armed: bool,
 }
 
 /// Why a cascade did not produce a verdict.
@@ -140,7 +180,14 @@ impl Mesh {
             suppressed_backpressure: 0,
             escalations: 0,
             escalation_armed: false,
+            correlation_armed: false,
         }
+    }
+
+    /// Arm the M11 correlation tier. See [`Mesh::correlation_armed`].
+    pub fn arm_correlation(mut self, on: bool) -> Self {
+        self.correlation_armed = on;
+        self
     }
 
     /// ⭐ **M10 — the direction the mesh did not have.**
@@ -318,10 +365,17 @@ impl Mesh {
                 .collect();
 
             for id in ids {
-                let (how, children, agent_tier, signal_class) = {
+                let (how, children, agent_tier, signal_class, spec) = {
                     let a = self.agents.iter().find(|a| a.id == id).expect("agent");
-                    (a.how, a.children.clone(), a.tier, a.signal_class.clone())
+                    (
+                        a.how,
+                        a.children.clone(),
+                        a.tier,
+                        a.signal_class.clone(),
+                        a.correlates.clone(),
+                    )
                 };
+                let correlating = self.correlation_armed && spec.is_some();
 
                 // A2A Task: the tier above asks this agent for a value AS OF the
                 // watermark. Recorded so the exchange is auditable.
@@ -356,25 +410,96 @@ impl Mesh {
                     // An aggregator reduces its children only, never raw signals.
                     ctx.inputs.retain(|i| children.contains(&i.agent_id));
                     ctx.signals.clear();
+                    ctx.signal_ids.clear();
                 } else {
                     // A tier-0 agent reduces only its own signal class.
                     ctx.inputs.clear();
                     if let Some(class) = &signal_class {
-                        ctx.signals = prefix
+                        // ⚠ signals and signal_ids are positionally aligned
+                        // (fold::TierContext). Narrowing one without the other
+                        // silently hands this agent the identity set of signals
+                        // it did NOT reduce — collect the pair in one pass.
+                        let (vals, ids): (Vec<f64>, Vec<String>) = prefix
                             .iter()
                             .filter_map(|r| match &r.payload {
                                 MeshEvent::SignalObserved(sg) if &sg.signal_class == class => {
-                                    Some(sg.value)
+                                    Some((sg.value, sg.device_id.clone()))
                                 }
                                 _ => None,
                             })
-                            .collect();
+                            .unzip();
+                        ctx.signals = vals;
+                        ctx.signal_ids = ids;
                     }
                 }
 
                 let observed: Vec<u64> = prefix.iter().map(|r| r.seq).collect();
 
-                let turns = run_cycle(&id, agent_tier, &ctx, how, reasoner);
+                // ⭐ M11 — carried on every aggregate so a correlator above can
+                // union rather than sum. Computed before the reduction so it
+                // describes exactly the context that produced the value.
+                let mut pop_ids = crate::fold::population_identities(&ctx);
+
+                // ⭐ M11 — the correlator path. It does NOT run the ordinary
+                // ReAct reduction: a recorded thought that says "weighted mean
+                // of 3 children" beside an emitted value that is a union-
+                // weighted correlation is a trace that lies, and a trace that
+                // lies is worse than no trace.
+                let mut correlated = None;
+                if correlating {
+                    let s = spec.as_ref().expect("correlating implies spec");
+                    match correlate(&ctx.inputs, s.rule, s.required_branches) {
+                        Ok(c) => {
+                            self.log.append(MeshEvent::AgentReasoned(AgentReasoned {
+                                agent_id: id.clone(),
+                                tier: agent_tier,
+                                phase: "correlate".into(),
+                                thought: format!(
+                                    "{:?} over {} branch(es): population={} (union) \
+                                     naive_sum={} overlap={} value={:.6}",
+                                    s.rule,
+                                    c.branches,
+                                    c.population,
+                                    c.naive_sum,
+                                    c.naive_sum.saturating_sub(c.population),
+                                    c.value,
+                                ),
+                                observed_seqs: observed.clone(),
+                            }))?;
+                            pop_ids = c.identities.clone();
+                            correlated = Some(c);
+                        }
+                        Err(why) => {
+                            // ⚠ A refused correlation emits NO aggregate — but
+                            // it does emit a record. Skipping silently is how a
+                            // missing branch becomes an invisible hole in the
+                            // denominator one tier up (M12).
+                            self.log
+                                .append(MeshEvent::CorrelationRefused(CorrelationRefused {
+                                    agent_id: id.clone(),
+                                    tier: agent_tier,
+                                    reason: refusal_code(&why).into(),
+                                    detail: why.to_string(),
+                                    up_to_seq: tier_watermark,
+                                }))?;
+                            task.transition(TaskState::Failed).expect("working->failed");
+                            self.log
+                                .append(MeshEvent::TaskTransitioned(TaskTransitioned {
+                                    task_id,
+                                    from_agent: "dispatcher".into(),
+                                    to_agent: id.clone(),
+                                    state: task.state.as_str().into(),
+                                }))?;
+                            continue;
+                        }
+                    }
+                }
+
+                let turns = if correlating {
+                    Vec::new()
+                } else {
+                    run_cycle(&id, agent_tier, &ctx, how, reasoner)
+                };
                 let mut value = 0.0;
                 let mut pop = 0u32;
                 for t in &turns {
@@ -393,6 +518,11 @@ impl Mesh {
                     }
                 }
 
+                if let Some(c) = &correlated {
+                    value = c.value;
+                    pop = c.population;
+                }
+
                 let emitted = self
                     .log
                     .append(MeshEvent::AggregateEmitted(AggregateEmitted {
@@ -400,6 +530,7 @@ impl Mesh {
                         tier: agent_tier,
                         value,
                         input_count: pop,
+                        population_ids: Some(pop_ids.clone()),
                         up_to_seq: tier_watermark,
                     }))?;
                 top_seq = emitted;
@@ -435,5 +566,18 @@ impl Mesh {
             up_to_seq: top_seq,
             events_appended: self.log.record_count()? - before,
         })
+    }
+}
+
+/// A short, stable code per refusal — the label a metric or an alert keys on.
+///
+/// ⚠ Separate from `Display`. The detail string carries agent ids and counts
+/// and would make an unbounded label set; the code is the closed one that can
+/// be pinned at 0 (`representation-drift.md`, "absent is not zero").
+fn refusal_code(r: &CorrelationRefusal) -> &'static str {
+    match r {
+        CorrelationRefusal::UnknownPopulation { .. } => "unknown_population",
+        CorrelationRefusal::NoInputs => "no_inputs",
+        CorrelationRefusal::TooFewBranches { .. } => "too_few_branches",
     }
 }
