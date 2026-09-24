@@ -79,7 +79,21 @@ Every variable the binary reads, with the reason — not just the value.
 | `NOETL_SIGNAL_MESH_CHECKPOINT_SECS` | *(none)* | **yes when `_STORE=ehdb`** | Seconds between durability barriers. ⚠⚠ **No default, and the process refuses to start without it**, because a durable store with no checkpoint survives *process* loss and not *node* loss and nothing running would say so. **Why a timer and not a lower `seal_max_records`:** the record threshold bounds the tail in **appends**, and the dangerous case is when appends *stop* — a half-full part then sits on one local disk indefinitely, so the quieter the mesh the worse the exposure. A timer bounds it in **seconds**, which is the unit node-loss cost is actually measured in, independent of traffic. `ehdb-l0` already shows the trap: `seal_max_age` exists but is only consulted on append. |
 | `NOETL_SIGNAL_MESH_A2A_TOKEN` | *(none)* | **yes when `_A2A=serve`** | Bearer token callers must present. ⚠ Env is acceptable here only because this is a **platform** credential for a dev harness. A business-logic secret belongs in the keychain, referenced by alias — see `execution-model.md`. |
 | `NOETL_SIGNAL_MESH_A2A_ADDR` (write routes) | — | — | ⚠ When `_A2A=serve` the service also exposes **`POST /mesh/signals`**, **`POST /mesh/cascade`** and **`GET /mesh/replay`** on the same port and behind the same bearer. These are the only write paths into the store; without them the service opens a durable volume, checkpoints it, and never writes a byte. |
-| `NOETL_SIGNAL_MESH_ESCALATION` *(not yet read — lands with the HTTP exposure)* | *(unset)* = off | no | ⭐ **M10 — event-driven escalation.** Arms the path by which a tier-0 agent pushes upward on its own instead of waiting for the scheduled cascade. Only the exact string `true` arms it. ⚠ Additive: the scheduled cascade is untouched and remains the correctness baseline. The endpoint is `POST /mesh/escalate`, and a *suppressed* escalation returns **200** with a reason — a non-event is a normal outcome, and it is counted. |
+| `NOETL_SIGNAL_MESH_ESCALATION` *(⚠ DOES NOT EXIST — see below)* | *(unset)* = off | no | ⭐ **M10 — event-driven escalation.** Arms the path by which a tier-0 agent pushes upward on its own instead of waiting for the scheduled cascade. Only the exact string `true` arms it. ⚠ Additive: the scheduled cascade is untouched and remains the correctness baseline. A *suppressed* escalation returns a reason rather than an error — a non-event is a normal outcome, and it is counted.
+
+⚠⚠ **Neither this variable nor `POST /mesh/escalate` exists on `main`.** The row
+describes the intended shape, not a knob anyone can set. `Mesh::escalate` is
+called only from `tests/m10_escalation.rs`; the router registers
+`/mesh/signals`, `/mesh/cascade`, `/mesh/replay` and `/metrics`, and nothing
+else. The same is true of M11 and M12: `Mesh::arm_correlation` and
+`Mesh::arm_coverage` have no caller in `serve.rs`, so `Mesh::with_store` leaves
+both `false`.
+
+The earlier note said these would become reachable "with the `/mesh/*` routes".
+That was wrong, and it was wrong in a predictable way: those routes were
+written before M10/M11/M12 existed, so landing them could not have wired
+capabilities that did not yet exist. **Existence and reachability are separate
+questions, and a merge order is not an answer to the second one.** |
 | `NOETL_SIGNAL_MESH_METRICS_ADDR` | *(unset)* = **no listener** | no | Standalone metrics bind. ⭐ Independent of `_A2A` on purpose: before M9 the only `/metrics` rode the A2A router, so a deployment could not be observed without also exposing its agent surface. |
 
 ### Variables this component does **not** read
