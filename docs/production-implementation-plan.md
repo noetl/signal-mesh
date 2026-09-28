@@ -659,12 +659,17 @@ Three things the build found:
    always read at `log.head()`, where the staleness is 0 by construction. It now
    accepts an optional `up_to_seq`.
 
-**The ehdb pin moved from `tag = "v0.3.0"` to `rev = "a6791e967f1a"`.** #368
-merged after v0.3.1 and ehdb has no `semantic-release.yml` — only `ci.yml` — so
-its tags are cut by hand and none exists for that commit. Cutting one is a
-release on another repository and not this change's to make. A `rev` satisfies
-the pin's stated reasoning at least as well as a tag, and cannot be moved
-afterwards. Repin to a tag when one containing #368 is published.
+**The ehdb pin.** #368 merged after v0.3.1 and ehdb has no
+`semantic-release.yml` — only `ci.yml` — so its tags are cut by hand and none
+then contained it. The milestone shipped on a temporary `rev = "a6791e96"`
+because cutting a tag is a release on another repository.
+
+⚠ **Retired 2026-09-28.** The chain-store workstream released **v0.4.0** and
+**v0.4.1**, both containing that commit, and the pin is now `tag = "v0.4.1"`.
+Verified as a behaviour change, not just a build: 99 tests green, clippy clean,
+the demo's output **byte-identical** to the rev-pin, and the live M3 gate
+answering the same three ways (OFF proceeds / STRONG refuses at 471 / BOUNDED
+1000 admits).
 
 **Flag** `NOETL_EHDB_READ_CONSISTENCY` / `NOETL_EHDB_MAX_STALENESS_MS`
 (**introduced here**), defaulting to `strong` / `0` — today's behaviour.
