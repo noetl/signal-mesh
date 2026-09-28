@@ -503,6 +503,31 @@ mod http {
         assert_eq!(j["suppressed"], "nominal");
     }
 
+    /// ⚠ D9 from the M3 battery: the cascade must honour the caller's
+    /// `up_to_seq`. Ignoring it and always using `head` survived every test,
+    /// because nothing had ever asked the route for a different watermark —
+    /// and it would make the M3 freshness gate unreachable over HTTP while
+    /// leaving it fully reachable in unit tests.
+    #[tokio::test]
+    async fn the_cascade_route_honours_the_callers_watermark() {
+        let s = app(false);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mesh/cascade")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"up_to_seq":99}"#.to_string()))
+            .expect("request");
+        let res = router(s).oneshot(req).await.expect("response");
+        let bytes = res.into_body().collect().await.expect("body").to_bytes();
+        let j: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        eprintln!("AC-W7 cascade at a named watermark: {j}");
+        assert_eq!(
+            j["cascaded_at_head"], 99,
+            "the route ignored the requested watermark: {j}"
+        );
+    }
+
     /// The same bearer discipline as every other mesh route.
     #[tokio::test]
     async fn the_route_refuses_an_unauthenticated_caller() {

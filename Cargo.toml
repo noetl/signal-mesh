@@ -10,17 +10,27 @@ readme = "README.md"
 publish = false
 
 [dependencies]
-# EHDB is consumed as a LIBRARY, pinned to a tag.
+# EHDB is consumed as a LIBRARY, pinned to an immutable revision.
 #
-# ⚠ Pinned by `tag`, not `branch`. A branch dependency re-resolves on every
+# ⚠ Pinned by `rev`, not `branch`. A branch dependency re-resolves on every
 # fresh `cargo build` with no lockfile, so two checkouts of the same commit can
-# compile against different ehdb source. The tag makes the dependency a fact
+# compile against different ehdb source. The rev makes the dependency a fact
 # about this commit rather than about when it was built.
+#
+# ⚠⚠ Was `tag = "v0.3.0"`. M3's configuration surface
+# (`read_consistency_from_env`, noetl/ehdb#368) merged to ehdb `main` AFTER
+# v0.3.1, and ehdb has no `semantic-release.yml` — only `ci.yml` — so its tags
+# are cut by hand and none exists for that commit yet. Cutting one is a release
+# on another repository and not this change's to make.
+#
+# A `rev` satisfies the reasoning above at least as well as a tag: both are
+# exact, and a rev cannot be moved afterwards while a tag can. Repin to a tag
+# when one containing #368 is published.
 #
 # The ehdb crates are not published to crates.io, so a git dependency is the
 # only option; `version` is therefore omitted deliberately.
-ehdb-core = { git = "https://github.com/noetl/ehdb", tag = "v0.3.0" }
-ehdb-l0 = { git = "https://github.com/noetl/ehdb", tag = "v0.3.0" }
+ehdb-core = { git = "https://github.com/noetl/ehdb", rev = "a6791e967f1a" }
+ehdb-l0 = { git = "https://github.com/noetl/ehdb", rev = "a6791e967f1a" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

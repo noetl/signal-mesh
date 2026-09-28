@@ -628,6 +628,44 @@ knob"; it is "introduce the knob, once, in ehdb, and then consume it."
    that has never refused is indistinguishable from one that cannot.
 4. The blueprint and spec corrections in §2.3 land in this change set.
 
+#### Shipped — 2026-09-24 (consuming half)
+
+ehdb side landed as [noetl/ehdb#368](https://github.com/noetl/ehdb/pull/368);
+this is the mesh consuming it. 9 acceptance tests in `tests/m3_freshness.rs`;
+planted-defect battery 8/8 with the control surviving.
+
+⚠⚠ **`fold::admits` had shipped with M1 — implemented, documented, six tests,
+and zero production callers.** An inert gate, the same class as M10/M11/M12
+before the wiring increment. The consuming half was therefore mostly *making
+the existing gate fire*, not writing a new one.
+
+Three things the build found:
+
+1. **The gate fired too late to mean what it said.** The cascade's first act is
+   to append the A2A `TaskTransitioned` records for the agent it is about to
+   run, so a check placed after the fold refused *with task events already
+   written and the head already moved*. "Refuses rather than reduces a short
+   prefix" is a claim about **side effects**, and a test asserting only the
+   returned error cannot see the difference — it was caught by asserting the
+   record count. The gate is now a pre-flight, before the tier loop.
+2. **A second, per-tier gate was written and then deleted.** The battery removed
+   it and *no test noticed*, which is the definition of the thing this milestone
+   exists to fix. It could not fire because this log is monotonic and gapless,
+   so the post-fold staleness always equals the pre-flight's `up_to_seq − head`.
+   Shipping it would have been a second inert gate added by the milestone about
+   inert gates. ⚠ If the store ever admits sequence **gaps** the two diverge and
+   it becomes necessary — re-add it then, *with a test that makes it refuse*.
+3. **The gate was reachable but unable to fire over HTTP.** `POST /mesh/cascade`
+   always read at `log.head()`, where the staleness is 0 by construction. It now
+   accepts an optional `up_to_seq`.
+
+**The ehdb pin moved from `tag = "v0.3.0"` to `rev = "a6791e967f1a"`.** #368
+merged after v0.3.1 and ehdb has no `semantic-release.yml` — only `ci.yml` — so
+its tags are cut by hand and none exists for that commit. Cutting one is a
+release on another repository and not this change's to make. A `rev` satisfies
+the pin's stated reasoning at least as well as a tag, and cannot be moved
+afterwards. Repin to a tag when one containing #368 is published.
+
 **Flag** `NOETL_EHDB_READ_CONSISTENCY` / `NOETL_EHDB_MAX_STALENESS_MS`
 (**introduced here**), defaulting to `strong` / `0` — today's behaviour.
 **Entry** M1 exited; an ehdb PR accepted.
