@@ -1,0 +1,20 @@
+# Pinned so clippy's lint set cannot move on its own.
+#
+# This repo's clippy step gates with `-D warnings` and NO allow-list, so any lint a
+# new Rust release adds reddens `main` with no code change at all. That is not
+# hypothetical in this fleet: the same shape was about to redden noetl/ehdb, whose
+# `-D warnings` gate met the `Atomic::fetch_update` deprecation introduced by
+# rustc 1.99.0 (CI's `@stable` rolled to it on 2026-10-03). signal-mesh happens to be
+# clean on 1.99.0 — verified — which is exactly why pinning now is cheap.
+#
+# ⚠ cargo honours this file over the rustup default, so it is what decides which
+# clippy runs. The toolchain action's console banner prints the version it INSTALLED,
+# which is not the same thing; the lint's own `rust-clippy/rust-X.Y.Z` URL is the
+# authoritative signal.
+#
+# 1.99.0 is what CI already resolved to, so nothing changes today. Bump deliberately,
+# together with any lint fallout.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
